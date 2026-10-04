@@ -1,0 +1,163 @@
+diff --git a/KrabEar/tests/test_es_per_sentence_markers_W1258.py b/KrabEar/tests/test_es_per_sentence_markers_W1258.py
+new file mode 100644
+index 0000000..14ea9c2
+--- /dev/null
++++ b/KrabEar/tests/test_es_per_sentence_markers_W1258.py
+@@ -0,0 +1,123 @@
++"""W1258 — PunctuationFixer ES per-sentence ¿/¡ prepend tests.
++
++Verifies that _fix_spanish prepends ¿/¡ only to the individual sentence
++that ends with ?/!, not to the entire text (W1250 F1 MED regression fix).
++
++Run:
++    PYTHONPATH=$(pwd)/KrabEar python -m unittest \
++        KrabEar/tests/test_es_per_sentence_markers_W1258.py -v
++"""
++
++import sys
++import os
++import unittest
++
++PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
++if PROJECT_ROOT not in sys.path:
++    sys.path.insert(0, PROJECT_ROOT)
++
++from core.punctuation_fixer import PunctuationFixer  # noqa: E402
++
++
++class TestEsMultiSentenceMarkersW1258(unittest.TestCase):
++    """Per-sentence ¿/¡ insertion — W1250 F1 MED regression tests."""
++
++    def setUp(self):
++        self.fixer = PunctuationFixer()
++
++    # ------------------------------------------------------------------ #
++    # test_es_multi_sentence_question_marker_per_sentence                  #
++    # ------------------------------------------------------------------ #
++    def test_es_multi_sentence_question_marker_per_sentence(self):
++        """'Hola. cómo estás?' → 'Hola. ¿Cómo estás?' (¿ only on last sentence)."""
++        result = self.fixer.fix("Hola. cómo estás?", language="es")
++        # ¿ must appear AFTER the first sentence separator, not at position 0
++        self.assertNotEqual(result[0], "¿",
++                            f"¿ must NOT be prepended to entire text: {result!r}")
++        self.assertIn("¿", result,
++                      f"¿ must appear somewhere in result: {result!r}")
++        # The greeting sentence must be intact
++        self.assertIn("Hola", result,
++                      f"'Hola' sentence must be preserved: {result!r}")
++        # ¿ must come after the period separator
++        iquest_pos = result.index("¿")
++        hola_pos = result.index("Hola")
++        self.assertGreater(iquest_pos, hola_pos,
++                           f"¿ must appear after 'Hola': {result!r}")
++
++    # ------------------------------------------------------------------ #
++    # test_es_multi_sentence_exclamation_marker_per_sentence               #
++    # ------------------------------------------------------------------ #
++    def test_es_multi_sentence_exclamation_marker_per_sentence(self):
++        """'Buenos días. qué sorpresa!' → ¡ only on second sentence."""
++        result = self.fixer.fix("Buenos días. qué sorpresa!", language="es")
++        self.assertNotEqual(result[0], "¡",
++                            f"¡ must NOT be prepended to entire text: {result!r}")
++        self.assertIn("¡", result,
++                      f"¡ must appear in result: {result!r}")
++        self.assertIn("Buenos", result)
++        iexcl_pos = result.index("¡")
++        buenos_pos = result.index("Buenos")
++        self.assertGreater(iexcl_pos, buenos_pos,
++                           f"¡ must appear after 'Buenos': {result!r}")
++
++    # ------------------------------------------------------------------ #
++    # test_es_mixed_question_exclamation_per_sentence                      #
++    # ------------------------------------------------------------------ #
++    def test_es_mixed_question_exclamation_per_sentence(self):
++        """'cómo estás? muy bien!' → ¿ on first sentence, ¡ on second."""
++        result = self.fixer.fix("cómo estás? muy bien!", language="es")
++        self.assertIn("¿", result, f"¿ expected: {result!r}")
++        self.assertIn("¡", result, f"¡ expected: {result!r}")
++        # ¿ must precede ¡ in the output
++        self.assertLess(result.index("¿"), result.index("¡"),
++                        f"¿ must come before ¡: {result!r}")
++
++    # ------------------------------------------------------------------ #
++    # test_es_existing_inverted_markers_not_duplicated                     #
++    # ------------------------------------------------------------------ #
++    def test_es_existing_inverted_markers_not_duplicated(self):
++        """'¿cómo estás? Hola. ¡qué bueno!' — existing markers not doubled."""
++        result = self.fixer.fix("¿cómo estás? Hola. ¡qué bueno!", language="es")
++        self.assertNotIn("¿¿", result,
++                         f"Double ¿¿ must not appear: {result!r}")
++        self.assertNotIn("¡¡", result,
++                         f"Double ¡¡ must not appear: {result!r}")
++
++    # ------------------------------------------------------------------ #
++    # test_es_single_question_still_works                                  #
++    # ------------------------------------------------------------------ #
++    def test_es_single_question_still_works(self):
++        """Single-sentence question 'cómo estás?' → '¿Cómo estás?'."""
++        result = self.fixer.fix("cómo estás?", language="es")
++        self.assertTrue(result.lstrip().startswith("¿"),
++                        f"Single question must start with ¿: {result!r}")
++        self.assertNotIn("¿¿", result)
++
++    def test_es_single_exclamation_still_works(self):
++        """Single-sentence exclamation 'qué bueno!' → '¡Qué bueno!'."""
++        result = self.fixer.fix("qué bueno!", language="es")
++        self.assertTrue(result.lstrip().startswith("¡"),
++                        f"Single exclamation must start with ¡: {result!r}")
++        self.assertNotIn("¡¡", result)
++
++    def test_es_declarative_sentence_unchanged(self):
++        """Plain declarative 'Hola. Buenos días.' gets no ¿/¡."""
++        result = self.fixer.fix("Hola. Buenos días.", language="es")
++        self.assertNotIn("¿", result,
++                         f"No ¿ expected for declarative: {result!r}")
++        self.assertNotIn("¡", result,
++                         f"No ¡ expected for declarative: {result!r}")
++
++    def test_es_three_sentences_only_question_marked(self):
++        """'Está bien. cómo te llamas. te llamas Juan?' — ¿ only on third."""
++        result = self.fixer.fix("Está bien. cómo te llamas. te llamas Juan?",
++                                language="es")
++        self.assertIn("¿", result)
++        # Count occurrences — should be exactly one ¿
++        self.assertEqual(result.count("¿"), 1,
++                         f"Expected exactly one ¿ but got: {result!r}")
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/KrabEar/tests/test_punctuation_fixer.py b/KrabEar/tests/test_punctuation_fixer.py
+index b6c1fc6..e0e8adb 100644
+--- a/KrabEar/tests/test_punctuation_fixer.py
++++ b/KrabEar/tests/test_punctuation_fixer.py
+@@ -348,5 +348,29 @@ class TestPunctuationFixerW1348RuleOrder(unittest.TestCase):
+                                  f"[{lang}] '{text}' → forbidden {forbidden!r} in {result!r}")
+ 
+ 
++class TestPunctuationFixerColonW1376(unittest.TestCase):
++    """W1374 F1 HIGH — colon symmetry fix tests."""
++
++    def setUp(self):
++        self.fixer = PunctuationFixer()
++
++    def test_space_added_after_colon_before_letter(self):
++        """'план:первый' → space inserted after colon before letter."""
++        result = self.fixer.fix("план:первый", language="ru")
++        self.assertIn(": ", result, f"Ожидается пробел после двоеточия: {result!r}")
++        self.assertNotIn(":п", result, f"Буква не должна прилипать к двоеточию: {result!r}")
++
++    def test_no_space_added_after_existing_colon_space(self):
++        """'план: первый' already has space after colon — must not double it."""
++        result = self.fixer.fix("план: первый пункт.", language="ru")
++        self.assertNotIn(":  ", result, f"Не должно быть двойного пробела после двоеточия: {result!r}")
++
++    def test_colon_no_corruption_in_url_like_text(self):
++        """'https://example.com' must pass through without modification of the '://'."""
++        text = "Ссылка https://example.com работает."
++        result = self.fixer.fix(text, language="ru")
++        self.assertIn("https://example.com", result, f"URL не должен меняться: {result!r}")
++
++
+ if __name__ == "__main__":
+     unittest.main()

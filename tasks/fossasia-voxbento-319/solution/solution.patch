@@ -1,0 +1,158 @@
+diff --git a/portal/transcription/providers/local.py b/portal/transcription/providers/local.py
+index 92d1e746..fff58084 100644
+--- a/portal/transcription/providers/local.py
++++ b/portal/transcription/providers/local.py
+@@ -27,6 +27,7 @@ class ModelEntry:
+ _loaded_models = {}
+ _active_booths_per_model = {}
+ _model_lock = threading.Lock()
++_load_lock = threading.Lock()
+ 
+ 
+ def increment_model_ref(model_size: str):
+@@ -42,15 +43,24 @@ def decrement_model_ref(model_size: str):
+ 
+ def get_model(model_size: str):
+     with _model_lock:
+-        if model_size not in _loaded_models:
+-            logger.info(f"Loading faster-whisper model: {model_size}")
+-            from faster_whisper import WhisperModel
++        if model_size in _loaded_models:
++            _loaded_models[model_size].last_used = time.time()
++            return _loaded_models[model_size].model
++
++    with _load_lock:
++        # Double-check inside the load lock
++        with _model_lock:
++            if model_size in _loaded_models:
++                _loaded_models[model_size].last_used = time.time()
++                return _loaded_models[model_size].model
++
++        logger.info(f"Loading faster-whisper model: {model_size}")
++        from faster_whisper import WhisperModel
+ 
+-            model = WhisperModel(model_size, device="cpu", compute_type="int8")
++        model = WhisperModel(model_size, device="cpu", compute_type="int8")
++        with _model_lock:
+             _loaded_models[model_size] = ModelEntry(model=model, last_used=time.time())
+-        else:
+-            _loaded_models[model_size].last_used = time.time()
+-        return _loaded_models[model_size].model
++            return _loaded_models[model_size].model
+ 
+ 
+ async def eviction_loop():
+diff --git a/portal/translations/providers/local.py b/portal/translations/providers/local.py
+index c462f9b0..f6a2f039 100644
+--- a/portal/translations/providers/local.py
++++ b/portal/translations/providers/local.py
+@@ -101,6 +101,7 @@ class ModelEntry:
+ _loaded_models = {}
+ _active_translations_per_model = {}
+ _model_lock = threading.Lock()
++_load_lock = threading.Lock()
+ 
+ 
+ def increment_model_ref(model_size: str):
+@@ -117,53 +118,60 @@ def decrement_model_ref(model_size: str):
+             _active_translations_per_model[model_size] -= 1
+ 
+ 
+-
+ def get_model_and_tokenizer(model_size: str):
+     with _model_lock:
+-        if model_size not in _loaded_models:
+-            logger.info(f"Loading NLLB model: {model_size}")
+-            import ctranslate2
+-            import transformers
+-            from huggingface_hub import snapshot_download
+-
+-            if not os.path.exists(model_size):
+-                try:
+-                    logger.info(f"Starting download of {model_size} from HuggingFace. This may take a few minutes...")
+-
+-                    class ScopedTqdm(ModelDownloadTqdm):
+-                        def __init__(self, *args, **kwargs):
+-                            super().__init__(*args, **kwargs)
+-                            self._custom_model_id = model_size
+-
+-                    with _progress_lock:
+-                        _download_progress[model_size] = {"n": 0, "total": 100, "rate": 0, "status": "downloading"}
+-                    hf_repo_id = model_size
+-                    rev = "main"
+-                    if model_size == "nllb-200-distilled-600M":
+-                        hf_repo_id = "JustFrederik/nllb-200-distilled-600M-ct2-int8"
+-                        rev = "302d78f00e6fdb50a1064059df7c392b735e9d05"
+-                    local_model_path = snapshot_download(repo_id=hf_repo_id, revision=rev, tqdm_class=ScopedTqdm)
+-                    with _progress_lock:
+-                        _download_progress[model_size]["status"] = "completed"
+-                    logger.info(f"Successfully downloaded {model_size} to {local_model_path}")
+-                except Exception as e:
+-                    logger.error(f"Failed to download {model_size} from HuggingFace: {e}")
+-                    with _progress_lock:
+-                        _download_progress[model_size] = {"status": "error"}
+-                    local_model_path = model_size
+-            else:
+-                local_model_path = model_size
+-                with _progress_lock:
+-                    _download_progress[model_size] = {"status": "completed"}
++        if model_size in _loaded_models:
++            _loaded_models[model_size].last_used = time.time()
++            return _loaded_models[model_size].model, _loaded_models[model_size].tokenizer
++
++    with _load_lock:
++        # Double-check inside the load lock
++        with _model_lock:
++            if model_size in _loaded_models:
++                _loaded_models[model_size].last_used = time.time()
++                return _loaded_models[model_size].model, _loaded_models[model_size].tokenizer
+ 
+-            tokenizer = transformers.AutoTokenizer.from_pretrained(local_model_path, src_lang="eng_Latn", revision="main")  # nosec
+-            model = ctranslate2.Translator(local_model_path, device="cpu", compute_type="int8")
++        logger.info(f"Loading NLLB model: {model_size}")
++        import ctranslate2
++        import transformers
++        from huggingface_hub import snapshot_download
+ 
+-            _loaded_models[model_size] = ModelEntry(model=model, tokenizer=tokenizer, last_used=time.time())
++        if not os.path.exists(model_size):
++            try:
++                logger.info(f"Starting download of {model_size} from HuggingFace. This may take a few minutes...")
++
++                class ScopedTqdm(ModelDownloadTqdm):
++                    def __init__(self, *args, **kwargs):
++                        super().__init__(*args, **kwargs)
++                        self._custom_model_id = model_size
++
++                with _progress_lock:
++                    _download_progress[model_size] = {"n": 0, "total": 100, "rate": 0, "status": "downloading"}
++                hf_repo_id = model_size
++                rev = "main"
++                if model_size == "nllb-200-distilled-600M":
++                    hf_repo_id = "JustFrederik/nllb-200-distilled-600M-ct2-int8"
++                    rev = "302d78f00e6fdb50a1064059df7c392b735e9d05"
++                local_model_path = snapshot_download(repo_id=hf_repo_id, revision=rev, tqdm_class=ScopedTqdm)
++                with _progress_lock:
++                    _download_progress[model_size]["status"] = "completed"
++                logger.info(f"Successfully downloaded {model_size} to {local_model_path}")
++            except Exception as e:
++                logger.error(f"Failed to download {model_size} from HuggingFace: {e}")
++                with _progress_lock:
++                    _download_progress[model_size] = {"status": "error"}
++                local_model_path = model_size
+         else:
+-            _loaded_models[model_size].last_used = time.time()
++            local_model_path = model_size
++            with _progress_lock:
++                _download_progress[model_size] = {"status": "completed"}
++
++        tokenizer = transformers.AutoTokenizer.from_pretrained(local_model_path, src_lang="eng_Latn", revision="main")  # nosec
++        model = ctranslate2.Translator(local_model_path, device="cpu", compute_type="int8")
+ 
+-        return _loaded_models[model_size].model, _loaded_models[model_size].tokenizer
++        with _model_lock:
++            _loaded_models[model_size] = ModelEntry(model=model, tokenizer=tokenizer, last_used=time.time())
++            return _loaded_models[model_size].model, _loaded_models[model_size].tokenizer
+ 
+ 
+ async def eviction_loop():

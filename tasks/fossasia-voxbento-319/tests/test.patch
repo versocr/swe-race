@@ -1,0 +1,121 @@
+diff --git a/tests/test_local_translation.py b/tests/test_local_translation.py
+index f0db4b70..eb66a6d8 100644
+--- a/tests/test_local_translation.py
++++ b/tests/test_local_translation.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import asyncio
++import threading
+ import time
+ from unittest.mock import patch
+ 
+@@ -88,3 +89,55 @@ async def test_local_provider_eviction_respects_ref_count():
+             pass
+ 
+     assert model_size not in _loaded_models
++
++
++
++@pytest.mark.anyio
++async def test_eviction_loop_does_not_block_on_model_load():
++    model_size = "test-model-slow-load"
++    if model_size in _loaded_models:
++        del _loaded_models[model_size]
++
++    lock_acquired_event = threading.Event()
++    release_lock_event = threading.Event()
++
++    def simulated_slow_download(*args, **kwargs):
++        # Signal that the background thread is actively holding the load lock
++        lock_acquired_event.set()
++        # Block until the main thread tells us to release
++        release_lock_event.wait(timeout=5.0)
++        return model_size
++
++    def background_loader():
++        with patch("huggingface_hub.snapshot_download", side_effect=simulated_slow_download), \
++             patch("ctranslate2.Translator"), \
++             patch("transformers.AutoTokenizer.from_pretrained"):
++            from portal.translations.providers.local import get_model_and_tokenizer
++
++            get_model_and_tokenizer(model_size)
++
++    # Start the slow model load in a background thread
++    t = threading.Thread(target=background_loader)
++    t.start()
++
++    # Yield control until the thread firmly acquires the load lock
++    while not lock_acquired_event.is_set():
++        await asyncio.sleep(0.01)
++
++    start_time = time.time()
++
++    # Run eviction loop for one pass, expecting it to NOT block on the slow download
++    with patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError()]):
++        try:
++            await asyncio.wait_for(eviction_loop(), timeout=1.0)
++        except asyncio.CancelledError:
++            pass
++        except TimeoutError:
++            pytest.fail("Eviction loop timed out because it was blocked by the model loading lock!")
++
++    elapsed = time.time() - start_time
++    assert elapsed < 1.0, f"Eviction loop blocked for {elapsed} seconds, indicating lock contention!"
++
++    # Release the background thread so it can finish
++    release_lock_event.set()
++    t.join()
+diff --git a/tests/test_transcription_providers.py b/tests/test_transcription_providers.py
+index 670c08aa..dc21fe29 100644
+--- a/tests/test_transcription_providers.py
++++ b/tests/test_transcription_providers.py
+@@ -104,3 +104,48 @@ async def test_local_model_ref_decrement_never_goes_negative(self):
+ 
+         decrement_model_ref("nonexistent-model")
+         assert _active_booths_per_model.get("nonexistent-model", 0) == 0
++
++    async def test_transcription_eviction_loop_does_not_block_on_model_load(self):
++        import threading
++        import time
++
++        from portal.transcription.providers.local import _loaded_models, eviction_loop
++
++        model_size = "test-model-slow-load"
++        if model_size in _loaded_models:
++            del _loaded_models[model_size]
++
++        lock_acquired_event = threading.Event()
++        release_lock_event = threading.Event()
++
++        def simulated_slow_load(*args, **kwargs):
++            lock_acquired_event.set()
++            release_lock_event.wait(timeout=5.0)
++            return MagicMock()
++
++        def background_loader():
++            with patch("faster_whisper.WhisperModel", side_effect=simulated_slow_load):
++                from portal.transcription.providers.local import get_model
++                get_model(model_size)
++
++        t = threading.Thread(target=background_loader)
++        t.start()
++
++        while not lock_acquired_event.is_set():
++            await asyncio.sleep(0.01)
++
++        start_time = time.time()
++
++        with patch("asyncio.sleep", side_effect=[None, asyncio.CancelledError()]):
++            try:
++                await asyncio.wait_for(eviction_loop(), timeout=1.0)
++            except asyncio.CancelledError:
++                pass
++            except TimeoutError:
++                pytest.fail("Eviction loop timed out because it was blocked by the model loading lock!")
++
++        elapsed = time.time() - start_time
++        assert elapsed < 1.0, f"Eviction loop blocked for {elapsed} seconds, indicating lock contention!"
++
++        release_lock_event.set()
++        t.join()

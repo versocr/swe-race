@@ -1,0 +1,85 @@
+diff --git a/src/maxo/dialogs/manager/bg_manager.py b/src/maxo/dialogs/manager/bg_manager.py
+index 13335b17..da6892e4 100644
+--- a/src/maxo/dialogs/manager/bg_manager.py
++++ b/src/maxo/dialogs/manager/bg_manager.py
+@@ -2,6 +2,7 @@
+ from collections.abc import AsyncIterator
+ from contextlib import asynccontextmanager
+ from datetime import UTC, datetime
++from functools import partial
+ from typing import Any
+ 
+ from maxo import Bot, Dispatcher, loggers
+@@ -19,6 +20,7 @@
+     StartMode,
+ )
+ from maxo.dialogs.api.entities.update_event import DialogFgEvent
++from maxo.dialogs.api.exceptions import DialogsError
+ from maxo.dialogs.api.internal import FakeUser
+ from maxo.dialogs.api.protocols import BaseDialogManager, BgManagerFactory
+ from maxo.dialogs.manager.updater import Updater
+@@ -232,20 +234,27 @@ async def fg(self) -> AsyncIterator[DialogManager]:
+         )
+         bot = self._event_context.bot
+         task = self._updater.notify_task(bot=bot, update=event)
++        # entered выставляет только хендлер fg, до которого событие может не дойти
++        task.add_done_callback(partial(_fail_entered, event.entered))
+         try:
+             manager = await event.entered
+-        except BaseException:
++        except asyncio.CancelledError:
++            event.exited.cancel()
++            raise
++        except Exception:
+             await task
+             raise
+         try:
+             yield manager
+         except Exception as e:
+             event.exited.set_exception(e)
+-            raise
+-        else:
+-            event.exited.set_result(None)
+-        finally:
+             await task
++            raise
++        except BaseException:
++            event.exited.cancel()
++            raise
++        event.exited.set_result(None)
++        await task
+ 
+ 
+ class BgManagerFactoryImpl(BgManagerFactory):
+@@ -282,3 +291,17 @@ def bg(
+             load=load,
+             chat_type=chat_type,
+         )
++
++
++def _fail_entered(
++    entered: asyncio.Future[DialogManager],
++    task: asyncio.Task[Any],
++) -> None:
++    if entered.done():
++        return
++    if task.cancelled():
++        entered.cancel()
++    else:
++        entered.set_exception(
++            task.exception() or DialogsError("Dialog fg event was not handled"),
++        )
+diff --git a/src/maxo/dialogs/manager/update_handler.py b/src/maxo/dialogs/manager/update_handler.py
+index c9adbcb9..11cae3e6 100644
+--- a/src/maxo/dialogs/manager/update_handler.py
++++ b/src/maxo/dialogs/manager/update_handler.py
+@@ -27,6 +27,9 @@ async def handle_aiogd_update(
+         await dialog_manager.switch_to(state=event.new_state)
+         await dialog_manager.show()
+     elif isinstance(event, DialogFgEvent):
++        if event.entered.done():
++            # Вызвавший fg() отменен раньше, чем событие дошло до хендлера
++            return
+         event.entered.set_result(dialog_manager)
+         await event.exited
+     elif event.action is DialogAction.UPDATE:

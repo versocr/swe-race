@@ -1,0 +1,35 @@
+diff --git a/src/integrations/prefect-dbt/prefect_dbt/core/runner.py b/src/integrations/prefect-dbt/prefect_dbt/core/runner.py
+index bb33db2660dd..a3375a0d46b7 100644
+--- a/src/integrations/prefect-dbt/prefect_dbt/core/runner.py
++++ b/src/integrations/prefect-dbt/prefect_dbt/core/runner.py
+@@ -460,6 +460,13 @@ def _stop_callback_processor(self) -> None:
+         if self._callback_thread and self._callback_thread.is_alive():
+             self._callback_thread.join(timeout=5.0)
+ 
++        # Reset state so next invoke() can create a fresh callback processor
++        self._event_queue = None
++        self._callback_thread = None
++        self._shutdown_event = None
++        self._queue_counter = 0
++        self._skipped_nodes = set()
++
+     def _callback_worker(self) -> None:
+         """Background worker thread that processes queued events."""
+         while not self._shutdown_event.is_set():
+diff --git a/src/integrations/prefect-dbt/prefect_dbt/core/runner.py b/src/integrations/prefect-dbt/prefect_dbt/core/runner.py
+index 734f002da396..f56215501738 100644
+--- a/src/integrations/prefect-dbt/prefect_dbt/core/runner.py
++++ b/src/integrations/prefect-dbt/prefect_dbt/core/runner.py
+@@ -240,8 +240,11 @@ def _get_upstream_manifest_nodes_and_configs(
+             if not depends_manifest_node:
+                 continue
+ 
++            # Skip nodes without relation_name. This primarily occurs for ephemeral
++            # models which are CTEs that don't create database objects. We skip rather
++            # than error because nodes without relation_name can't be tracked as assets.
+             if not depends_manifest_node.relation_name:
+-                raise ValueError("Relation name not found in manifest")
++                continue
+ 
+             upstream_manifest_nodes.append(
+                 (

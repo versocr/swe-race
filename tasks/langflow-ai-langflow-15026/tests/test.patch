@@ -1,0 +1,185 @@
+diff --git a/src/backend/tests/unit/api/v2/test_workflow.py b/src/backend/tests/unit/api/v2/test_workflow.py
+index a548ab3aea84..f1e3ff2a1af2 100644
+--- a/src/backend/tests/unit/api/v2/test_workflow.py
++++ b/src/backend/tests/unit/api/v2/test_workflow.py
+@@ -12,6 +12,7 @@
+ """
+ 
+ from datetime import datetime, timezone
++from types import SimpleNamespace
+ from unittest.mock import AsyncMock, MagicMock, patch
+ from uuid import UUID, uuid4
+ 
+@@ -19,6 +20,7 @@
+ from httpx import AsyncClient
+ from langflow.services.database.models.flow.model import Flow
+ from langflow.services.database.models.jobs.model import Job, JobType
++from langflow.services.task.service import TaskService
+ from lfx.schema.workflow import JobStatus, WorkflowExecutionResponse
+ from lfx.services.deps import session_scope
+ from sqlalchemy.exc import OperationalError
+@@ -388,6 +390,55 @@ async def test_stop_workflow_success(
+             mock_bg_service.stop_job.assert_awaited_once()
+             mock_job_service.update_job_status.assert_awaited_once_with(UUID(job_id), JobStatus.CANCELLED)
+ 
++    async def test_stop_workflow_with_celery_task_service(
++        self,
++        client: AsyncClient,
++        created_api_key,
++        monkeypatch,
++    ):
++        """Celery mode must reach the stop signal and CANCELLED update (#14943).
++
++        The other stop tests replace TaskService with an AsyncMock, which hides
++        that CeleryBackend.revoke_task is synchronous.
++        """
++        job_id = uuid4()
++        mock_job = MagicMock(
++            job_id=job_id,
++            status=JobStatus.IN_PROGRESS,
++            type=JobType.WORKFLOW,
++            user_id=None,
++            job_metadata={"request": {"mode": "background"}},
++        )
++        celery_backend = MagicMock(name="CeleryBackend")
++        celery_backend.revoke_task.return_value = True
++        monkeypatch.setattr("langflow.services.task.service.CeleryBackend", lambda: celery_backend)
++        task_service = TaskService(SimpleNamespace(settings=SimpleNamespace(celery_enabled=True)))
++
++        with (
++            patch("langflow.api.v2.workflow.get_job_service") as mock_get_job_service,
++            patch("langflow.api.v2.workflow.get_task_service", return_value=task_service),
++            patch("langflow.api.v2.workflow.get_background_execution_service") as mock_get_bg_service,
++        ):
++            mock_job_service = MagicMock()
++            mock_job_service.get_job_by_job_id = AsyncMock(return_value=mock_job)
++            mock_job_service.update_job_status = AsyncMock()
++            mock_get_job_service.return_value = mock_job_service
++            mock_bg_service = MagicMock()
++            mock_bg_service.stop_job = AsyncMock()
++            mock_get_bg_service.return_value = mock_bg_service
++
++            response = await client.post(
++                "api/v2/workflows/stop",
++                json={"job_id": str(job_id)},
++                headers={"x-api-key": created_api_key.api_key},
++            )
++
++        assert response.status_code == 200, response.text
++        assert "cancelled successfully" in response.json()["message"]
++        celery_backend.revoke_task.assert_called_once_with(str(job_id))
++        mock_bg_service.stop_job.assert_awaited_once()
++        mock_job_service.update_job_status.assert_awaited_once_with(job_id, JobStatus.CANCELLED)
++
+     @pytest.mark.parametrize(
+         ("job_metadata", "job_status", "expected_mode"),
+         [
+diff --git a/src/backend/tests/unit/services/tasks/test_task_service_revoke.py b/src/backend/tests/unit/services/tasks/test_task_service_revoke.py
+new file mode 100644
+index 000000000000..0ea78aa766db
+--- /dev/null
++++ b/src/backend/tests/unit/services/tasks/test_task_service_revoke.py
+@@ -0,0 +1,103 @@
++"""TaskService.revoke_task must bridge the synchronous Celery backend (#14943).
++
++``CeleryBackend.revoke_task`` publishes a revoke broadcast synchronously. The
++service used to ``await`` its return value directly, so every Celery-mode
++cancellation (workflow stop, KB ingestion cancel, memory-base delete) raised
++``TypeError: object NoneType can't be used in 'await' expression``.
++
++Celery is not a declared dependency, so the service-contract tests use a
++synchronous stand-in backend and run everywhere; the real-Celery tests skip
++unless ``celery`` is installed.
++"""
++
++from __future__ import annotations
++
++import threading
++from types import SimpleNamespace
++from uuid import uuid4
++
++import pytest
++from langflow.services.task.service import TaskService
++
++
++class _SyncRevokeBackend:
++    """Stand-in with CeleryBackend's synchronous ``revoke_task`` contract."""
++
++    name = "celery"
++
++    def __init__(self, *, error: Exception | None = None) -> None:
++        self.error = error
++        self.calls: list[tuple[str, int]] = []
++
++    def revoke_task(self, task_id: str) -> bool:
++        self.calls.append((task_id, threading.get_ident()))
++        if self.error is not None:
++            raise self.error
++        return True
++
++
++def _celery_task_service(monkeypatch, backend) -> TaskService:
++    monkeypatch.setattr("langflow.services.task.service.CeleryBackend", lambda: backend)
++    return TaskService(SimpleNamespace(settings=SimpleNamespace(celery_enabled=True)))
++
++
++async def test_celery_revoke_accepts_synchronous_backend(monkeypatch):
++    backend = _SyncRevokeBackend()
++    service = _celery_task_service(monkeypatch, backend)
++    task_id = uuid4()
++
++    assert await service.revoke_task(task_id) is True
++    assert [sent_task_id for sent_task_id, _ in backend.calls] == [str(task_id)]
++
++
++async def test_celery_revoke_publishes_off_the_event_loop(monkeypatch):
++    backend = _SyncRevokeBackend()
++    service = _celery_task_service(monkeypatch, backend)
++
++    await service.revoke_task(uuid4())
++
++    [(_, publish_thread)] = backend.calls
++    assert publish_thread != threading.get_ident()
++
++
++async def test_celery_revoke_propagates_broker_errors(monkeypatch):
++    service = _celery_task_service(monkeypatch, _SyncRevokeBackend(error=ConnectionError("broker unavailable")))
++
++    with pytest.raises(ConnectionError, match="broker unavailable"):
++        await service.revoke_task(uuid4())
++
++
++@pytest.fixture
++def celery_app(monkeypatch):
++    celery = pytest.importorskip("celery")
++    # In-memory transport: exercises the real AsyncResult -> control -> kombu
++    # publish path with no external broker and no worker.
++    with celery.Celery("revoke-test", broker="memory://", set_as_current=False) as app:
++        monkeypatch.setattr("langflow.worker.celery_app", app)
++        yield app
++
++
++def test_celery_backend_reports_published_revoke(celery_app, monkeypatch):
++    """``AsyncResult.revoke`` returns ``None``; the backend must still report success."""
++    from langflow.services.task.backends.celery import CeleryBackend
++
++    sent = []
++    original_revoke = celery_app.control.revoke
++
++    def spy_revoke(task_id, **kwargs):
++        sent.append((task_id, kwargs.get("terminate")))
++        return original_revoke(task_id, **kwargs)
++
++    monkeypatch.setattr(celery_app.control, "revoke", spy_revoke)
++    task_id = str(uuid4())
++
++    assert CeleryBackend().revoke_task(task_id) is True
++    assert sent == [(task_id, True)]
++
++
++async def test_task_service_revoke_with_real_celery(celery_app):
++    """The reproduction from #14943, end to end through the real Celery backend."""
++    service = TaskService(SimpleNamespace(settings=SimpleNamespace(celery_enabled=True)))
++
++    assert service.backend.celery_app is celery_app
++    assert await service.revoke_task(uuid4()) is True

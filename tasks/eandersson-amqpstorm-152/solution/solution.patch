@@ -1,0 +1,45 @@
+diff --git a/CHANGELOG.rst b/CHANGELOG.rst
+index 68129ae..60a03b6 100644
+--- a/CHANGELOG.rst
++++ b/CHANGELOG.rst
+@@ -1,6 +1,12 @@
+ Changelog
+ =========
+ 
++Version 3.1.1
++-------------
++- Connection close is now resilient to ``IO.socket`` being cleared
++  partway through ``_close_socket``; the socket reference is captured
++  once and reused for the shutdown/close calls.
++
+ Version 3.1
+ -----------
+ - Added inline type hints across the public API and shipped ``py.typed``
+diff --git a/amqpstorm/io.py b/amqpstorm/io.py
+index 68312cc..8f31d04 100644
+--- a/amqpstorm/io.py
++++ b/amqpstorm/io.py
+@@ -187,18 +187,19 @@ def _close_socket(self) -> None:
+ 
+         :return:
+         """
+-        if not self.socket:
++        sock = self.socket
++        if sock is None:
+             return
+         try:
+             if self.poller:
+                 self.poller.close()
+             if self.use_ssl:
+-                self.socket.unwrap()  # type: ignore[attr-defined]
+-            self.socket.shutdown(socket.SHUT_RDWR)
++                sock.unwrap()  # type: ignore[attr-defined]
++            sock.shutdown(socket.SHUT_RDWR)
+         except (OSError, ValueError):
+             pass
+ 
+-        self.socket.close()
++        sock.close()
+ 
+     def _get_socket_addresses(self) -> list[Any]:
+         """Get Socket address information.

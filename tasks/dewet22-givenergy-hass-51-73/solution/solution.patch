@@ -1,0 +1,53 @@
+diff --git a/custom_components/givenergy_local/__init__.py b/custom_components/givenergy_local/__init__.py
+index cb9b630..a5aaf69 100644
+--- a/custom_components/givenergy_local/__init__.py
++++ b/custom_components/givenergy_local/__init__.py
+@@ -206,7 +206,7 @@ async def handle_capture_frames(call: ServiceCall) -> None:
+                     raise HomeAssistantError("No connected GivEnergy inverter found")
+ 
+             for coordinator in coordinators:
+-                if coordinator.data is None:
++                if coordinator.data is None or coordinator._client is None:
+                     continue
+                 inv = coordinator.data.inverter.serial_number.lower()
+                 frames: list[str] = []
+diff --git a/custom_components/givenergy_local/sensor.py b/custom_components/givenergy_local/sensor.py
+index 1fc0beb..a6b0dee 100644
+--- a/custom_components/givenergy_local/sensor.py
++++ b/custom_components/givenergy_local/sensor.py
+@@ -597,12 +597,18 @@ class GivEnergyCoordinatorSensorDescription(SensorEntityDescription):
+     ),
+     # --- Diagnostic ---
+     GivEnergyInverterSensorDescription(
++        # The raw register at IR(47):IR(48) is already in hours of operation,
++        # despite the field name suggesting otherwise. Earlier code divided by
++        # 3600 assuming seconds, which produced values ~3600× too small (e.g.
++        # ~10h after several years of operation). Tracked upstream at
++        # givenergy-modbus#84 — once the library annotates the unit explicitly
++        # this comment can come out.
+         key="work_time_total",
+         name="Work Time Total",
+         native_unit_of_measurement=UnitOfTime.HOURS,
+         device_class=SensorDeviceClass.DURATION,
+         state_class=SensorStateClass.TOTAL_INCREASING,
+-        value_fn=lambda inv: round(inv.work_time_total / 3600, 1),
++        value_fn=lambda inv: inv.work_time_total,
+         entity_category=EntityCategory.DIAGNOSTIC,
+     ),
+     GivEnergyInverterSensorDescription(
+diff --git a/custom_components/givenergy_local/sensor.py b/custom_components/givenergy_local/sensor.py
+index b269d23..4cfca88 100644
+--- a/custom_components/givenergy_local/sensor.py
++++ b/custom_components/givenergy_local/sensor.py
+@@ -105,7 +105,10 @@ class GivEnergyCoordinatorSensorDescription(SensorEntityDescription):
+         device_class=SensorDeviceClass.ENUM,
+         options=[s.name.lower() for s in Status],
+         translation_key="inverter_status",
+-        value_fn=lambda inv: inv.status.name.lower(),
++        # inv.status can be None while the library serves an empty model during
++        # partial / pre-first-poll windows (givenergy-modbus's .inverter accessor
++        # returns an empty model rather than raising); guard like the other enums.
++        value_fn=lambda inv: inv.status.name.lower() if inv.status is not None else None,
+         entity_category=EntityCategory.DIAGNOSTIC,
+     ),
+     GivEnergyInverterSensorDescription(

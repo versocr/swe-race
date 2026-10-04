@@ -1,0 +1,34 @@
+diff --git a/switchbot/devices/device.py b/switchbot/devices/device.py
+index a80fb41c..1970ef92 100644
+--- a/switchbot/devices/device.py
++++ b/switchbot/devices/device.py
+@@ -955,6 +955,12 @@ def _decrypt(self, data: bytearray) -> bytes:
+         if len(data) == 0:
+             return b""
+         if self._iv is None:
++            if self._expected_disconnect:
++                _LOGGER.debug(
++                    "%s: Cannot decrypt, IV is None during expected disconnect",
++                    self.name,
++                )
++                return b""
+             raise RuntimeError("Cannot decrypt: IV is None")
+         decryptor = self._get_cipher().decryptor()
+         return decryptor.update(data) + decryptor.finalize()
+diff --git a/switchbot/devices/lock.py b/switchbot/devices/lock.py
+index c8be8915..1ac41f82 100644
+--- a/switchbot/devices/lock.py
++++ b/switchbot/devices/lock.py
+@@ -214,6 +214,12 @@ async def _disable_notifications(self) -> bool:
+ 
+     def _notification_handler(self, _sender: int, data: bytearray) -> None:
+         if self._notifications_enabled and self._check_command_result(data, 0, {0xF}):
++            if self._expected_disconnect:
++                _LOGGER.debug(
++                    "%s: Ignoring lock notification during expected disconnect",
++                    self.name,
++                )
++                return
+             self._update_lock_status(data)
+         else:
+             super()._notification_handler(_sender, data)

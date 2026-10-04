@@ -1,0 +1,119 @@
+diff --git a/tests/test_rate_limiter.py b/tests/test_rate_limiter.py
+index 240215f..140c00e 100644
+--- a/tests/test_rate_limiter.py
++++ b/tests/test_rate_limiter.py
+@@ -14,34 +14,34 @@ async def test_initial_tokens(self) -> None:
+     @pytest.mark.asyncio
+     async def test_read_acquire_consumes_read_tokens(self) -> None:
+         bucket = ReadWriteTokenBucket(read_rate=10.0, write_rate=5.0)
+-        await bucket.acquire(global_cost=1.0, write_cost=0.0)
++        await bucket.acquire(read_cost=1.0, write_cost=0.0)
+         assert bucket.read_tokens == 9.0
+         assert bucket.write_tokens == 5.0  # write unchanged
+ 
+     @pytest.mark.asyncio
+     async def test_write_acquire_consumes_write_tokens(self) -> None:
+         bucket = ReadWriteTokenBucket(read_rate=10.0, write_rate=5.0)
+-        await bucket.acquire(global_cost=1.0, write_cost=1.0)
++        await bucket.acquire(read_cost=1.0, write_cost=1.0)
+         assert bucket.write_tokens == 4.0
+         assert bucket.read_tokens == 10.0  # read unchanged
+ 
+     @pytest.mark.asyncio
+     async def test_try_acquire_success(self) -> None:
+         bucket = ReadWriteTokenBucket(read_rate=10.0, write_rate=5.0)
+-        result = await bucket.try_acquire(global_cost=1.0, write_cost=0.0)
++        result = await bucket.try_acquire(read_cost=1.0, write_cost=0.0)
+         assert result is True
+ 
+     @pytest.mark.asyncio
+     async def test_try_acquire_insufficient_tokens(self) -> None:
+         bucket = ReadWriteTokenBucket(read_rate=1.0, write_rate=1.0)
+-        await bucket.acquire(global_cost=1.0, write_cost=0.0)
+-        result = await bucket.try_acquire(global_cost=1.0, write_cost=0.0)
++        await bucket.acquire(read_cost=1.0, write_cost=0.0)
++        result = await bucket.try_acquire(read_cost=1.0, write_cost=0.0)
+         assert result is False
+ 
+     @pytest.mark.asyncio
+     async def test_get_wait_time_immediate(self) -> None:
+         bucket = ReadWriteTokenBucket(read_rate=10.0, write_rate=5.0)
+-        wait = await bucket.get_wait_time(global_cost=1.0, write_cost=0.0)
++        wait = await bucket.get_wait_time(read_cost=1.0, write_cost=0.0)
+         assert wait == 0.0
+ 
+     @pytest.mark.asyncio
+@@ -84,9 +84,9 @@ def test_invalid_rates(self) -> None:
+     async def test_exceed_capacity_raises(self) -> None:
+         bucket = ReadWriteTokenBucket(read_rate=5.0, write_rate=3.0)
+         with pytest.raises(ValueError, match="exceeds"):
+-            await bucket.acquire(global_cost=6.0, write_cost=0.0)
++            await bucket.acquire(read_cost=6.0, write_cost=0.0)
+         with pytest.raises(ValueError, match="exceeds"):
+-            await bucket.acquire(global_cost=1.0, write_cost=4.0)
++            await bucket.acquire(read_cost=1.0, write_cost=4.0)
+ 
+     def test_get_status(self) -> None:
+         bucket = ReadWriteTokenBucket(read_rate=10.0, write_rate=5.0)
+@@ -105,7 +105,7 @@ async def test_concurrent_reads_consume_correct_tokens(self) -> None:
+         import asyncio
+ 
+         bucket = ReadWriteTokenBucket(read_rate=10.0, write_rate=5.0)
+-        tasks = [bucket.acquire(global_cost=1.0, write_cost=0.0) for _ in range(5)]
++        tasks = [bucket.acquire(read_cost=1.0, write_cost=0.0) for _ in range(5)]
+         await asyncio.gather(*tasks)
+         assert bucket.read_tokens == 5.0
+         assert bucket.write_tokens == 5.0  # writes untouched
+@@ -116,7 +116,7 @@ async def test_concurrent_writes_consume_correct_tokens(self) -> None:
+         import asyncio
+ 
+         bucket = ReadWriteTokenBucket(read_rate=10.0, write_rate=5.0)
+-        tasks = [bucket.acquire(global_cost=1.0, write_cost=1.0) for _ in range(3)]
++        tasks = [bucket.acquire(read_cost=1.0, write_cost=1.0) for _ in range(3)]
+         await asyncio.gather(*tasks)
+         assert bucket.write_tokens == 2.0
+         assert bucket.read_tokens == 10.0  # reads untouched
+@@ -127,8 +127,8 @@ async def test_concurrent_mixed_load(self) -> None:
+         import asyncio
+ 
+         bucket = ReadWriteTokenBucket(read_rate=10.0, write_rate=5.0)
+-        read_tasks = [bucket.acquire(global_cost=1.0, write_cost=0.0) for _ in range(5)]
+-        write_tasks = [bucket.acquire(global_cost=1.0, write_cost=1.0) for _ in range(3)]
++        read_tasks = [bucket.acquire(read_cost=1.0, write_cost=0.0) for _ in range(5)]
++        write_tasks = [bucket.acquire(read_cost=1.0, write_cost=1.0) for _ in range(3)]
+         await asyncio.gather(*read_tasks, *write_tasks)
+         assert bucket.read_tokens == 5.0
+         assert bucket.write_tokens == 2.0
+@@ -141,10 +141,30 @@ async def test_no_double_consumption(self) -> None:
+         bucket = ReadWriteTokenBucket(read_rate=5.0, write_rate=5.0)
+         # Try to consume 5 tokens concurrently (exactly capacity)
+         results = await asyncio.gather(
+-            *[bucket.try_acquire(global_cost=1.0, write_cost=0.0) for _ in range(5)]
++            *[bucket.try_acquire(read_cost=1.0, write_cost=0.0) for _ in range(5)]
+         )
+         assert sum(results) == 5  # all should succeed
+         assert bucket.read_tokens == 0.0
+ 
+         # 6th attempt should fail (no tokens left)
+-        assert await bucket.try_acquire(global_cost=1.0, write_cost=0.0) is False
++        assert await bucket.try_acquire(read_cost=1.0, write_cost=0.0) is False
++
++    @pytest.mark.asyncio
++    async def test_acquire_does_not_deadlock(self) -> None:
++        """Concurrent acquires that exceed capacity must not deadlock.
++
++        Regression test: the lock must be released before sleeping so other
++        coroutines can proceed when tokens refill.
++        """
++        import asyncio
++
++        bucket = ReadWriteTokenBucket(read_rate=2.0, write_rate=2.0)
++        # Launch 4 writes (capacity is 2), so 2 must wait for refill.
++        # With a 1-second window this should complete in ~1s, not deadlock.
++        results = await asyncio.wait_for(
++            asyncio.gather(*[
++                bucket.acquire(read_cost=0.0, write_cost=1.0) for _ in range(4)
++            ]),
++            timeout=5.0,
++        )
++        assert len(results) == 4

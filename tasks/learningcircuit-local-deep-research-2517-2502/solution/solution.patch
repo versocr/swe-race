@@ -1,0 +1,554 @@
+diff --git a/src/local_deep_research/advanced_search_system/strategies/direct_search_strategy.py b/src/local_deep_research/advanced_search_system/strategies/direct_search_strategy.py
+index 71da2c971b1..e793413311c 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/direct_search_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/direct_search_strategy.py
+@@ -41,9 +41,13 @@ def __init__(
+         filter_reindex: bool = True,
+         cross_engine_max_results: int = None,
+         all_links_of_system=None,
++        settings_snapshot=None,
+     ):
+         """Initialize with minimal components for efficiency."""
+-        super().__init__(all_links_of_system=all_links_of_system)
++        super().__init__(
++            all_links_of_system=all_links_of_system,
++            settings_snapshot=settings_snapshot,
++        )
+         self.search = search
+         self.model = model
+         self.progress_callback = None
+@@ -62,7 +66,9 @@ def __init__(
+         )
+ 
+         # Use provided citation_handler or create one
+-        self.citation_handler = citation_handler or CitationHandler(self.model)
++        self.citation_handler = citation_handler or CitationHandler(
++            self.model, settings_snapshot=settings_snapshot
++        )
+         self.findings_repository = FindingsRepository(self.model)
+ 
+     def analyze_topic(self, query: str) -> Dict:
+diff --git a/src/local_deep_research/advanced_search_system/strategies/focused_iteration_strategy.py b/src/local_deep_research/advanced_search_system/strategies/focused_iteration_strategy.py
+index 2b92ae56d37..3c9393bda45 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/focused_iteration_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/focused_iteration_strategy.py
+@@ -121,7 +121,9 @@ def __init__(
+             "forced_answer" if use_browsecomp_optimization else "standard"
+         )
+         self.citation_handler = citation_handler or CitationHandler(
+-            self.model, handler_type=handler_type
++            self.model,
++            handler_type=handler_type,
++            settings_snapshot=settings_snapshot,
+         )
+         self.findings_repository = FindingsRepository(self.model)
+ 
+diff --git a/src/local_deep_research/advanced_search_system/strategies/iterdrag_strategy.py b/src/local_deep_research/advanced_search_system/strategies/iterdrag_strategy.py
+index 539d6db5e63..3c1961b823c 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/iterdrag_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/iterdrag_strategy.py
+@@ -54,8 +54,10 @@ def __init__(
+         self.progress_callback = None
+         # Note: questions_by_iteration is already initialized by parent class
+ 
+-        # Use provided citation_handler or create one
+-        self.citation_handler = CitationHandler(self.model)
++        # Create citation handler with settings
++        self.citation_handler = CitationHandler(
++            self.model, settings_snapshot=settings_snapshot
++        )
+ 
+         # Initialize components
+         self.question_generator = DecompositionQuestionGenerator(self.model)
+diff --git a/src/local_deep_research/advanced_search_system/strategies/parallel_search_strategy.py b/src/local_deep_research/advanced_search_system/strategies/parallel_search_strategy.py
+index 180860f6603..2065ccae461 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/parallel_search_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/parallel_search_strategy.py
+@@ -77,7 +77,9 @@ def __init__(
+             self.search.include_full_content = include_text_content
+ 
+         # Use provided citation_handler or create one
+-        self.citation_handler = citation_handler or CitationHandler(self.model)
++        self.citation_handler = citation_handler or CitationHandler(
++            self.model, settings_snapshot=settings_snapshot
++        )
+ 
+         # Initialize components
+         self.question_generator = StandardQuestionGenerator(self.model)
+diff --git a/src/local_deep_research/advanced_search_system/strategies/rapid_search_strategy.py b/src/local_deep_research/advanced_search_system/strategies/rapid_search_strategy.py
+index ee55d8d26db..4a9810b25c5 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/rapid_search_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/rapid_search_strategy.py
+@@ -41,7 +41,9 @@ def __init__(
+         # Note: questions_by_iteration is already initialized by parent class
+ 
+         # Use provided citation_handler or create one
+-        self.citation_handler = citation_handler or CitationHandler(self.model)
++        self.citation_handler = citation_handler or CitationHandler(
++            self.model, settings_snapshot=settings_snapshot
++        )
+ 
+         # Initialize components
+         self.question_generator = StandardQuestionGenerator(self.model)
+diff --git a/src/local_deep_research/advanced_search_system/strategies/source_based_strategy.py b/src/local_deep_research/advanced_search_system/strategies/source_based_strategy.py
+index 8ea18d53993..8b95d0c0d1c 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/source_based_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/source_based_strategy.py
+@@ -127,7 +127,9 @@ def __init__(
+             self.search.include_full_content = include_text_content
+ 
+         # Use provided citation_handler or create default
+-        self.citation_handler = citation_handler or CitationHandler(self.model)
++        self.citation_handler = citation_handler or CitationHandler(
++            self.model, settings_snapshot=settings_snapshot
++        )
+ 
+         # Initialize question generator (atomic facts variant is experimental)
+         if use_atomic_facts:
+diff --git a/src/local_deep_research/advanced_search_system/strategies/standard_strategy.py b/src/local_deep_research/advanced_search_system/strategies/standard_strategy.py
+index 456e365ec7a..f5958112e6f 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/standard_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/standard_strategy.py
+@@ -56,7 +56,9 @@ def __init__(
+         # Note: questions_by_iteration is already initialized by parent class
+ 
+         # Use provided citation_handler or create one
+-        self.citation_handler = citation_handler or CitationHandler(self.model)
++        self.citation_handler = citation_handler or CitationHandler(
++            self.model, settings_snapshot=settings_snapshot
++        )
+ 
+         # Initialize specialized components
+         self.question_generator = StandardQuestionGenerator(self.model)
+diff --git a/src/local_deep_research/advanced_search_system/candidate_exploration/parallel_explorer.py b/src/local_deep_research/advanced_search_system/candidate_exploration/parallel_explorer.py
+index c58f9ad0656..af6e235f0ba 100644
+--- a/src/local_deep_research/advanced_search_system/candidate_exploration/parallel_explorer.py
++++ b/src/local_deep_research/advanced_search_system/candidate_exploration/parallel_explorer.py
+@@ -11,6 +11,7 @@
+ 
+ from loguru import logger
+ 
++from ...database.thread_local_session import thread_cleanup
+ from ..candidates.base_candidate import Candidate
+ from ..constraints.base_constraint import Constraint
+ from .base_explorer import (
+@@ -84,7 +85,9 @@ def explore(
+ 
+                 # Submit all queries for parallel execution
+                 future_to_query = {
+-                    executor.submit(self._execute_search, query): query
++                    executor.submit(
++                        thread_cleanup(self._execute_search), query
++                    ): query
+                     for query in current_queries
+                 }
+ 
+diff --git a/src/local_deep_research/advanced_search_system/strategies/browsecomp_entity_strategy.py b/src/local_deep_research/advanced_search_system/strategies/browsecomp_entity_strategy.py
+index 78975c238a2..20a36932452 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/browsecomp_entity_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/browsecomp_entity_strategy.py
+@@ -20,6 +20,7 @@
+ 
+ from loguru import logger
+ 
++from ...database.thread_local_session import thread_cleanup
+ from ...utilities.json_utils import extract_json, get_llm_response_text
+ from ...utilities.search_cache import get_search_cache
+ from ..candidate_exploration import ConstraintGuidedExplorer
+@@ -919,7 +920,11 @@ def analyze_topic(self, query: str) -> Dict:
+ 
+                     with concurrent.futures.ThreadPoolExecutor() as executor:
+                         future = executor.submit(
+-                            asyncio.run, self._analyze_topic_async(query)
++                            thread_cleanup(
++                                lambda: asyncio.run(
++                                    self._analyze_topic_async(query)
++                                )
++                            )
+                         )
+                         return future.result()
+                 else:
+diff --git a/src/local_deep_research/advanced_search_system/strategies/concurrent_dual_confidence_strategy.py b/src/local_deep_research/advanced_search_system/strategies/concurrent_dual_confidence_strategy.py
+index c9cebd6ee77..fa24786dcec 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/concurrent_dual_confidence_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/concurrent_dual_confidence_strategy.py
+@@ -17,6 +17,7 @@
+ 
+ from loguru import logger
+ 
++from ...database.thread_local_session import thread_cleanup
+ from ..candidates.base_candidate import Candidate
+ from ..constraints.base_constraint import Constraint, ConstraintType
+ from .dual_confidence_with_rejection import DualConfidenceWithRejectionStrategy
+@@ -284,6 +285,7 @@ def _build_combined_query(self, constraints: List[Constraint]) -> str:
+             terms
+         )  # Use space instead of AND for more natural queries
+ 
++    @thread_cleanup
+     def _evaluate_candidate_thread(
+         self, candidate: Candidate
+     ) -> Tuple[Candidate, float]:
+diff --git a/src/local_deep_research/advanced_search_system/strategies/constraint_parallel_strategy.py b/src/local_deep_research/advanced_search_system/strategies/constraint_parallel_strategy.py
+index b5b4a28f1a2..b17e0049cc2 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/constraint_parallel_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/constraint_parallel_strategy.py
+@@ -17,6 +17,7 @@
+ 
+ from loguru import logger
+ 
++from ...database.thread_local_session import thread_cleanup
+ from ..candidates.base_candidate import Candidate
+ from ..constraints.base_constraint import Constraint
+ from .dual_confidence_with_rejection import DualConfidenceWithRejectionStrategy
+@@ -233,6 +234,7 @@ def _run_parallel_constraint_searches(self):
+         # Wait for evaluations to complete
+         self._finalize_evaluations()
+ 
++    @thread_cleanup
+     def _run_constraint_search(
+         self, constraint: Constraint, index: int, total: int
+     ) -> List[Candidate]:
+@@ -320,6 +322,7 @@ def _submit_candidates_for_evaluation(self, candidates: List[Candidate]):
+             self.state.evaluation_futures.append(future)
+             self.state.total_evaluated += 1
+ 
++    @thread_cleanup
+     def _evaluate_candidate_thread(
+         self, candidate: Candidate
+     ) -> Tuple[Candidate, float]:
+diff --git a/src/local_deep_research/advanced_search_system/strategies/early_stop_constrained_strategy.py b/src/local_deep_research/advanced_search_system/strategies/early_stop_constrained_strategy.py
+index 46de2fc30c5..8bb789d72a2 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/early_stop_constrained_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/early_stop_constrained_strategy.py
+@@ -9,6 +9,7 @@
+ 
+ from loguru import logger
+ 
++from ...database.thread_local_session import thread_cleanup
+ from ..candidates.base_candidate import Candidate
+ from ..constraints.base_constraint import Constraint
+ from .parallel_constrained_strategy import ParallelConstrainedStrategy
+@@ -77,7 +78,9 @@ def _parallel_search(self, combinations: List) -> List[Candidate]:
+                             if candidate.name not in self.evaluating_candidates:
+                                 self.evaluating_candidates.add(candidate.name)
+                                 eval_future = executor.submit(
+-                                    self._evaluate_candidate_immediately,
++                                    thread_cleanup(
++                                        self._evaluate_candidate_immediately
++                                    ),
+                                     candidate,
+                                 )
+                                 evaluation_futures.append(eval_future)
+diff --git a/src/local_deep_research/advanced_search_system/strategies/llm_driven_modular_strategy.py b/src/local_deep_research/advanced_search_system/strategies/llm_driven_modular_strategy.py
+index 6a424e86090..1b495cea1a2 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/llm_driven_modular_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/llm_driven_modular_strategy.py
+@@ -9,6 +9,7 @@
+ 
+ from loguru import logger
+ 
++from ...database.thread_local_session import thread_cleanup
+ from ...utilities.json_utils import extract_json
+ 
+ from ..candidate_exploration import AdaptiveExplorer
+@@ -411,7 +412,9 @@ def analyze_topic(self, query: str) -> Dict:
+ 
+                     with concurrent.futures.ThreadPoolExecutor() as executor:
+                         future = executor.submit(
+-                            lambda: asyncio.run(self.search(query))
++                            thread_cleanup(
++                                lambda: asyncio.run(self.search(query))
++                            )
+                         )
+                         answer, metadata = future.result()
+                 else:
+diff --git a/src/local_deep_research/advanced_search_system/strategies/modular_strategy.py b/src/local_deep_research/advanced_search_system/strategies/modular_strategy.py
+index 1f7e56b0fb2..d2032e9dc4e 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/modular_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/modular_strategy.py
+@@ -10,6 +10,7 @@
+ 
+ from loguru import logger
+ 
++from ...database.thread_local_session import thread_cleanup
+ from ...utilities.json_utils import extract_json
+ from ...utilities.search_cache import get_search_cache, normalize_entity_query
+ from ..candidate_exploration import (
+@@ -525,7 +526,10 @@ async def search(
+                     # Submit all searches in the batch concurrently
+                     future_to_query = {
+                         executor.submit(
+-                            self.candidate_explorer._execute_search, query
++                            thread_cleanup(
++                                self.candidate_explorer._execute_search
++                            ),
++                            query,
+                         ): query
+                         for query in batch
+                     }
+@@ -1091,7 +1095,9 @@ def analyze_topic(self, query: str) -> Dict:
+ 
+                     with concurrent.futures.ThreadPoolExecutor() as executor:
+                         future = executor.submit(
+-                            lambda: asyncio.run(self.search(query))
++                            thread_cleanup(
++                                lambda: asyncio.run(self.search(query))
++                            )
+                         )
+                         answer, metadata = future.result()
+                 else:
+diff --git a/src/local_deep_research/advanced_search_system/strategies/news_strategy.py b/src/local_deep_research/advanced_search_system/strategies/news_strategy.py
+index dcbd2317659..f31be288574 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/news_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/news_strategy.py
+@@ -9,6 +9,7 @@
+ 
+ from .base_strategy import BaseSearchStrategy
+ from ..questions.news_question import NewsQuestionGenerator
++from ...database.thread_local_session import thread_cleanup
+ from ...utilities.json_utils import extract_json
+ 
+ 
+@@ -249,7 +250,11 @@ def analyze_topic(self, query: str) -> Dict:
+ 
+                 with concurrent.futures.ThreadPoolExecutor() as executor:
+                     future = executor.submit(
+-                        asyncio.run, self.analyze_findings(all_findings)
++                        thread_cleanup(
++                            lambda: asyncio.run(
++                                self.analyze_findings(all_findings)
++                            )
++                        )
+                     )
+                     analysis = future.result()
+             else:
+diff --git a/src/local_deep_research/advanced_search_system/strategies/parallel_constrained_strategy.py b/src/local_deep_research/advanced_search_system/strategies/parallel_constrained_strategy.py
+index e81f22ec47c..03a0c210033 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/parallel_constrained_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/parallel_constrained_strategy.py
+@@ -14,6 +14,7 @@
+ 
+ from loguru import logger
+ 
++from ...database.thread_local_session import thread_cleanup
+ from ..candidates.base_candidate import Candidate
+ from ..constraints.base_constraint import Constraint, ConstraintType
+ from .constrained_search_strategy import ConstrainedSearchStrategy
+@@ -355,6 +356,7 @@ def _parallel_search(
+ 
+         return all_candidates
+ 
++    @thread_cleanup
+     def _execute_combination_search(
+         self, combination: SearchCombination
+     ) -> List[Candidate]:
+diff --git a/src/local_deep_research/advanced_search_system/strategies/parallel_search_strategy.py b/src/local_deep_research/advanced_search_system/strategies/parallel_search_strategy.py
+index 2065ccae461..125f93c2de9 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/parallel_search_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/parallel_search_strategy.py
+@@ -10,6 +10,7 @@
+ from ...citation_handler import CitationHandler
+ 
+ # Model and search should be provided by AdvancedSearchSystem
++from ...database.thread_local_session import thread_cleanup
+ from ...utilities.search_utilities import extract_links_from_search_results
+ from ..filters.cross_engine_filter import CrossEngineFilter
+ from ..findings.repository import FindingsRepository
+@@ -229,6 +230,7 @@ def analyze_topic(self, query: str) -> Dict:
+                 )
+ 
+                 # Function for thread pool
++                @thread_cleanup
+                 def search_question(q):
+                     try:
+                         result = self.search.run(q)
+diff --git a/src/local_deep_research/advanced_search_system/strategies/smart_query_strategy.py b/src/local_deep_research/advanced_search_system/strategies/smart_query_strategy.py
+index f92ff420689..756068b6262 100644
+--- a/src/local_deep_research/advanced_search_system/strategies/smart_query_strategy.py
++++ b/src/local_deep_research/advanced_search_system/strategies/smart_query_strategy.py
+@@ -7,6 +7,7 @@
+ 
+ from loguru import logger
+ 
++from ...database.thread_local_session import thread_cleanup
+ from ..constraints.base_constraint import Constraint
+ from ..constraints.constraint_analyzer import ConstraintType
+ from .early_stop_constrained_strategy import EarlyStopConstrainedStrategy
+@@ -143,6 +144,7 @@ def _build_standard_query(self, constraints: List[Constraint]) -> str:
+ 
+         return " ".join(query_parts)
+ 
++    @thread_cleanup
+     def _execute_combination_search(self, combo) -> List:
+         """Override to generate multiple query variations per combination."""
+         all_candidates = []
+@@ -164,7 +166,9 @@ def _execute_combination_search(self, combo) -> List:
+                         continue
+ 
+                     self.searched_queries.add(normalized_query)
+-                    future = executor.submit(self._execute_search, query)
++                    future = executor.submit(
++                        thread_cleanup(self._execute_search), query
++                    )
+                     futures.append((query, future))
+ 
+                 for query, future in futures:
+@@ -358,7 +362,9 @@ def _search_entity_seeds(self):
+                 query = f'"{seed}"'
+                 if query.lower() not in self.searched_queries:
+                     self.searched_queries.add(query.lower())
+-                    future = executor.submit(self._execute_search, query)
++                    future = executor.submit(
++                        thread_cleanup(self._execute_search), query
++                    )
+                     futures.append((seed, future))
+ 
+             for seed, future in futures:
+@@ -427,7 +433,9 @@ def _try_direct_property_search(self):
+                 ]:  # Limit to avoid too many searches
+                     if query.lower() not in self.searched_queries:
+                         self.searched_queries.add(query.lower())
+-                        future = executor.submit(self._execute_search, query)
++                        future = executor.submit(
++                            thread_cleanup(self._execute_search), query
++                        )
+                         futures.append(future)
+ 
+                 for future in futures:
+diff --git a/src/local_deep_research/database/thread_local_session.py b/src/local_deep_research/database/thread_local_session.py
+index 8ced41547e7..5e0c2c83f5f 100644
+--- a/src/local_deep_research/database/thread_local_session.py
++++ b/src/local_deep_research/database/thread_local_session.py
+@@ -5,6 +5,7 @@
+ 
+ import functools
+ import threading
++from contextlib import ContextDecorator
+ from typing import Optional, Dict, Tuple
+ from sqlalchemy import text
+ from sqlalchemy.exc import PendingRollbackError
+@@ -187,36 +188,66 @@ def cleanup_current_thread():
+     thread_session_manager.cleanup_thread()
+ 
+ 
+-def thread_cleanup(func):
+-    """Decorator ensuring all thread-local resources are cleaned up when func exits.
++class _ThreadCleanup(ContextDecorator):
++    """Context manager / decorator for thread-local resource cleanup."""
+ 
+-    Use on any function that runs in a background thread, ThreadPoolExecutor,
+-    or APScheduler job.
+-    """
++    def __enter__(self):
++        return self
+ 
+-    @functools.wraps(func)
+-    def wrapper(*args, **kwargs):
++    def __exit__(self, exc_type, exc_val, exc_tb):
+         try:
+-            return func(*args, **kwargs)
+-        finally:
+-            try:
+-                cleanup_current_thread()
+-            except Exception:
+-                pass
+-            try:
+-                from ..config.thread_settings import clear_settings_context
++            cleanup_current_thread()
++        except Exception:
++            logger.debug(
++                "thread_cleanup: error during DB session cleanup",
++                exc_info=True,
++            )
++        try:
++            from ..config.thread_settings import clear_settings_context
+ 
+-                clear_settings_context()
+-            except Exception:
+-                pass
+-            try:
+-                from ..utilities.thread_context import clear_search_context
++            clear_settings_context()
++        except Exception:
++            logger.debug(
++                "thread_cleanup: error clearing settings context",
++                exc_info=True,
++            )
++        try:
++            from ..utilities.thread_context import clear_search_context
+ 
+-                clear_search_context()
+-            except Exception:
+-                pass
++            clear_search_context()
++        except Exception:
++            logger.debug(
++                "thread_cleanup: error clearing search context",
++                exc_info=True,
++            )
++        return False
++
++
++def thread_cleanup(func=None):
++    """Ensure all thread-local resources are cleaned up when a function or block exits.
++
++    Works as a bare decorator, a decorator factory, or a context manager::
++
++        @thread_cleanup
++        def worker(): ...
++
++        @thread_cleanup()
++        def worker(): ...
++
++        with thread_cleanup():
++            ...
++
++        executor.submit(thread_cleanup(func), arg)
++    """
++    if func is not None:
++
++        @functools.wraps(func)
++        def wrapper(*args, **kwargs):
++            with _ThreadCleanup():
++                return func(*args, **kwargs)
+ 
+-    return wrapper
++        return wrapper
++    return _ThreadCleanup()
+ 
+ 
+ # Context manager for automatic cleanup
+diff --git a/src/local_deep_research/news/subscription_manager/scheduler.py b/src/local_deep_research/news/subscription_manager/scheduler.py
+index 9f9183059d5..b0cc6d79734 100644
+--- a/src/local_deep_research/news/subscription_manager/scheduler.py
++++ b/src/local_deep_research/news/subscription_manager/scheduler.py
+@@ -1212,6 +1212,7 @@ def _check_subscription(self, username: str, subscription_id: int):
+         except Exception:
+             logger.exception(f"Error checking subscription {subscription_id}")
+ 
++    @thread_cleanup
+     def _trigger_subscription_research_sync(
+         self, username: str, subscription: Dict[str, Any]
+     ):
+diff --git a/src/local_deep_research/utilities/thread_context.py b/src/local_deep_research/utilities/thread_context.py
+index 461b507b2b7..820f5b02855 100644
+--- a/src/local_deep_research/utilities/thread_context.py
++++ b/src/local_deep_research/utilities/thread_context.py
+@@ -130,5 +130,17 @@ def wrapper(*args, **kwargs):
+         finally:
+             if context is not None:
+                 clear_search_context()
++                # Clean up thread-local DB engines created by metrics recording
++                try:
++                    from ..database.thread_local_session import (
++                        cleanup_current_thread,
++                    )
++
++                    cleanup_current_thread()
++                except Exception:
++                    logger.debug(
++                        "preserve_research_context: error during cleanup_current_thread",
++                        exc_info=True,
++                    )
+ 
+     return wrapper

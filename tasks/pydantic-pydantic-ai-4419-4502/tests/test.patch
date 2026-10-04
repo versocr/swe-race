@@ -1,0 +1,443 @@
+diff --git a/tests/test_a2a.py b/tests/test_a2a.py
+index 9560030c..c1913e6b 100644
+--- a/tests/test_a2a.py
++++ b/tests/test_a2a.py
+@@ -591,6 +591,7 @@ async def test_a2a_multiple_tasks_same_context():
+                     ModelRequest(
+                         parts=[UserPromptPart(content='First message', timestamp=IsDatetime())],
+                         timestamp=IsNow(tz=timezone.utc),
++                        run_id=IsStr(),
+                     )
+                 ]
+             )
+@@ -630,6 +631,7 @@ async def test_a2a_multiple_tasks_same_context():
+                     ModelRequest(
+                         parts=[UserPromptPart(content='First message', timestamp=IsDatetime())],
+                         timestamp=IsNow(tz=timezone.utc),
++                        run_id=IsStr(),
+                     ),
+                     ModelResponse(
+                         parts=[
+@@ -653,6 +655,7 @@ async def test_a2a_multiple_tasks_same_context():
+                             UserPromptPart(content='Second message', timestamp=IsDatetime()),
+                         ],
+                         timestamp=IsNow(tz=timezone.utc),
++                        run_id=IsStr(),
+                     ),
+                 ]
+             )
+diff --git a/tests/test_ag_ui.py b/tests/test_ag_ui.py
+index 8ea2ebf0..90a2a5de 100644
+--- a/tests/test_ag_ui.py
++++ b/tests/test_ag_ui.py
+@@ -30,6 +30,7 @@ from pydantic_ai import (
+     PartDeltaEvent,
+     PartEndEvent,
+     PartStartEvent,
++    RequestUsage,
+     SystemPromptPart,
+     TextPart,
+     TextPartDelta,
+@@ -1534,6 +1535,8 @@ async def test_callback_sync() -> None:
+     # Verify we can access messages
+     messages = run_result.all_messages()
+     assert len(messages) >= 1
++    assert isinstance(messages[0], ModelRequest)
++    assert messages[0].run_id == run_result.run_id
+ 
+     # Verify events were still streamed normally
+     assert len(events) > 0
+@@ -1541,6 +1544,56 @@ async def test_callback_sync() -> None:
+     assert events[-1]['type'] == 'RUN_FINISHED'
+ 
+ 
++async def test_adapter_sets_current_run_id_on_trailing_mapped_request() -> None:
++    """The adapter sets `run_id` on the current run's mapped request, not older history."""
++    captured_results: list[AgentRunResult[Any]] = []
++
++    def sync_callback(run_result: AgentRunResult[Any]) -> None:
++        captured_results.append(run_result)
++
++    agent = Agent(TestModel())
++    run_input = create_input(
++        UserMessage(id='msg0', content='Previous question'),
++        AssistantMessage(id='msg1', content='Previous response'),
++        UserMessage(id='msg2', content='Hello!'),
++    )
++
++    await run_and_collect_events(agent, run_input, on_complete=sync_callback)
++
++    assert len(captured_results) == 1
++    run_result = captured_results[0]
++    messages = run_result.all_messages()
++    assert messages == snapshot(
++        [
++            ModelRequest(
++                parts=[UserPromptPart(content='Previous question', timestamp=IsDatetime())],
++            ),
++            ModelResponse(
++                parts=[TextPart(content='Previous response')],
++                timestamp=IsDatetime(),
++            ),
++            ModelRequest(
++                parts=[UserPromptPart(content='Hello!', timestamp=IsDatetime())],
++                timestamp=IsDatetime(),
++                run_id=(run_id := IsSameStr()),
++            ),
++            ModelResponse(
++                parts=[TextPart(content='success (no tool calls)')],
++                usage=RequestUsage(input_tokens=IsInt(), output_tokens=IsInt()),
++                model_name='test',
++                timestamp=IsDatetime(),
++                provider_name='test',
++                run_id=run_id,
++            ),
++        ]
++    )
++    assert messages[0].run_id is None
++    assert messages[1].run_id is None
++    assert messages[2].run_id == run_result.run_id
++    assert messages[3].run_id == run_result.run_id
++    assert run_result.new_messages() == messages[-2:]
++
++
+ async def test_callback_async() -> None:
+     """Test that async callbacks work correctly."""
+ 
+diff --git a/tests/test_agent.py b/tests/test_agent.py
+index 6574ba52..7d223f27 100644
+--- a/tests/test_agent.py
++++ b/tests/test_agent.py
+@@ -2591,6 +2591,7 @@ def test_run_with_history_ending_on_model_request_and_no_user_prompt():
+                 ],
+                 timestamp=IsNow(tz=timezone.utc),
+                 instructions='New instructions',
++                run_id=IsStr(),
+             ),
+             ModelResponse(
+                 parts=[TextPart(content='success (no tool calls)')],
+@@ -2602,7 +2603,7 @@ def test_run_with_history_ending_on_model_request_and_no_user_prompt():
+         ]
+     )
+ 
+-    assert result.new_messages() == result.all_messages()[-1:]
++    assert result.new_messages() == result.all_messages()[-2:]
+ 
+ 
+ def test_run_with_history_ending_on_model_response_with_tool_calls_and_no_user_prompt():
+@@ -6479,6 +6480,58 @@ def test_parallel_mcp_calls():
+     assert result.output == snapshot('finished')
+ 
+ 
++async def test_parallel_tool_exception_cancels_sibling_tasks():
++    """Non-CancelledError exceptions during parallel tool execution must cancel sibling tasks.
++
++    Regression test for https://github.com/pydantic/pydantic-ai/issues/4423.
++    Previously only asyncio.CancelledError triggered cleanup; any other exception
++    left the remaining tasks running as orphaned asyncio tasks.
++    """
++    slow_tool_started = asyncio.Event()
++    slow_tool_cancelled = asyncio.Event()
++
++    async def call_two_tools(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
++        return ModelResponse(
++            parts=[
++                ToolCallPart(tool_name='fast_failing_tool'),
++                ToolCallPart(tool_name='slow_tool'),
++            ]
++        )
++
++    agent = Agent(FunctionModel(call_two_tools))
++
++    @agent.tool_plain
++    async def fast_failing_tool() -> str:
++        # Yield control so slow_tool can start, then raise.
++        await asyncio.sleep(0)
++        raise RuntimeError('boom')
++
++    @agent.tool_plain
++    async def slow_tool() -> str:
++        slow_tool_started.set()
++        try:
++            await asyncio.sleep(10)
++        except asyncio.CancelledError:
++            slow_tool_cancelled.set()
++            raise
++        return 'done'  # pragma: no cover
++
++    tasks_before = asyncio.all_tasks()
++    with pytest.raises(RuntimeError, match='boom'):
++        await agent.run('call tools')
++
++    # Give the event loop a moment to process cancellations.
++    await asyncio.sleep(0)
++
++    # The slow tool must have started (confirming both tasks ran in parallel).
++    assert slow_tool_started.is_set(), 'slow_tool never started — not running in parallel'
++    # The slow tool must have been cancelled when fast_failing_tool raised.
++    assert slow_tool_cancelled.is_set(), 'slow_tool was not cancelled after RuntimeError'
++    # No new asyncio tasks should be left over from this run.
++    leaked = asyncio.all_tasks() - tasks_before
++    assert not leaked, f'Orphaned tasks remain: {leaked}'
++
++
+ @pytest.mark.parametrize('mode', ['argument', 'contextmanager'])
+ def test_sequential_calls(mode: Literal['argument', 'contextmanager']):
+     """Test that tool calls are executed correctly when a `sequential` tool is present in the call."""
+@@ -7702,6 +7755,16 @@ async def test_message_history():
+             pass
+         assert run.new_messages() == snapshot(
+             [
++                ModelRequest(
++                    parts=[
++                        UserPromptPart(
++                            content='Hello',
++                            timestamp=IsDatetime(),
++                        )
++                    ],
++                    timestamp=IsDatetime(),
++                    run_id=IsStr(),
++                ),
+                 ModelResponse(
+                     parts=[TextPart(content='ok here is text')],
+                     usage=RequestUsage(input_tokens=51, output_tokens=4),
+@@ -7711,7 +7774,7 @@ async def test_message_history():
+                 ),
+             ]
+         )
+-        assert run.new_messages_json().startswith(b'[{"parts":[{"content":"ok here is text",')
++        assert run.new_messages_json().startswith(b'[{"parts":[{"content":"Hello",')
+         assert run.all_messages() == snapshot(
+             [
+                 ModelRequest(
+@@ -7722,6 +7785,7 @@ async def test_message_history():
+                         )
+                     ],
+                     timestamp=IsNow(tz=timezone.utc),
++                    run_id=IsStr(),
+                 ),
+                 ModelResponse(
+                     parts=[TextPart(content='ok here is text')],
+diff --git a/tests/test_dbos.py b/tests/test_dbos.py
+index f5ca552c..db3a76fd 100644
+--- a/tests/test_dbos.py
++++ b/tests/test_dbos.py
+@@ -1156,6 +1156,7 @@ async def test_dbos_agent_with_hitl_tool(allow_model_requests: None, dbos: DBOS)
+                 ],
+                 timestamp=IsNow(tz=timezone.utc),
+                 instructions='Just call tools without asking for confirmation.',
++                run_id=IsStr(),
+             ),
+             ModelResponse(
+                 parts=[
+@@ -1296,6 +1297,7 @@ def test_dbos_agent_with_hitl_tool_sync(allow_model_requests: None, dbos: DBOS):
+                 ],
+                 timestamp=IsNow(tz=timezone.utc),
+                 instructions='Just call tools without asking for confirmation.',
++                run_id=IsStr(),
+             ),
+             ModelResponse(
+                 parts=[
+diff --git a/tests/test_history_processor.py b/tests/test_history_processor.py
+index d81d6b63..eb4848a6 100644
+--- a/tests/test_history_processor.py
++++ b/tests/test_history_processor.py
+@@ -1,3 +1,4 @@
++import uuid
+ from collections.abc import AsyncIterator
+ from copy import deepcopy
+ from typing import Any
+@@ -1287,8 +1288,8 @@ async def test_history_processor_resuming_without_prompt(
+ ):
+     """
+     When running without a user prompt (resuming from history), new_messages()
+-    should only include messages generated by the model, not the reused
+-    history even when a history processor modifies the message list.
++    should include the resumed request when that request has the current
++    run_id.
+     """
+ 
+     def prepend_summary(messages: list[ModelMessage]) -> list[ModelMessage]:
+@@ -1339,6 +1340,7 @@ async def test_history_processor_resuming_without_prompt(
+                     )
+                 ],
+                 timestamp=IsDatetime(),
++                run_id=IsStr(),
+             ),
+             ModelResponse(
+                 parts=[TextPart(content='Provider response')],
+@@ -1349,13 +1351,14 @@ async def test_history_processor_resuming_without_prompt(
+             ),
+         ]
+     )
+-    assert result.new_messages() == result.all_messages()[-1:]
++    assert result.new_messages() == result.all_messages()[-2:]
+ 
+ 
+-async def test_resuming_without_prompt_with_tool_calls_excludes_resumed_request():
++async def test_resuming_without_prompt_with_tool_calls_includes_resumed_request_with_current_run_id():
+     """
+     When resuming without a user prompt and the model enters a tool-call loop,
+-    new_messages() should exclude the resumed history request.
++    new_messages() should include the resumed history request when it has
++    the current run_id.
+     """
+ 
+     call_count = 0
+@@ -1384,6 +1387,7 @@ async def test_resuming_without_prompt_with_tool_calls_excludes_resumed_request(
+             ModelRequest(
+                 parts=[UserPromptPart(content='Original prompt', timestamp=IsDatetime())],
+                 timestamp=IsDatetime(),
++                run_id=IsStr(),
+             ),
+             ModelResponse(
+                 parts=[ToolCallPart(tool_name='my_tool', args={}, tool_call_id='tool_call_1')],
+@@ -1414,7 +1418,68 @@ async def test_resuming_without_prompt_with_tool_calls_excludes_resumed_request(
+         ]
+     )
+ 
+-    assert result.new_messages() == result.all_messages()[-3:]
++    assert result.new_messages() == result.all_messages()
++
++
++async def test_resuming_without_prompt_excludes_request_with_different_run_id(
++    function_model: FunctionModel, received_messages: list[ModelMessage]
++):
++    """
++    When running without a user prompt and the resumed request already has a
++    run_id from a *previous* run, new_messages() should exclude it — only
++    messages stamped with the current run_id should be returned.
++    """
++    previous_run_id = str(uuid.uuid4())
++
++    agent = Agent(function_model)
++
++    message_history = [
++        ModelRequest(parts=[UserPromptPart(content='Earlier question')]),
++        ModelResponse(parts=[TextPart(content='Earlier answer')]),
++        ModelRequest(
++            parts=[UserPromptPart(content='Previous run prompt')],
++            run_id=previous_run_id,
++        ),
++    ]
++
++    with capture_run_messages() as captured_messages:
++        result = await agent.run(message_history=message_history)
++
++    assert received_messages == snapshot(
++        [
++            ModelRequest(parts=[UserPromptPart(content='Earlier question', timestamp=IsDatetime())]),
++            ModelResponse(parts=[TextPart(content='Earlier answer')], timestamp=IsDatetime()),
++            ModelRequest(
++                parts=[UserPromptPart(content='Previous run prompt', timestamp=IsDatetime())],
++                timestamp=IsDatetime(),
++                run_id=previous_run_id,
++            ),
++        ]
++    )
++
++    assert captured_messages == result.all_messages()
++    assert result.all_messages() == snapshot(
++        [
++            ModelRequest(parts=[UserPromptPart(content='Earlier question', timestamp=IsDatetime())]),
++            ModelResponse(parts=[TextPart(content='Earlier answer')], timestamp=IsDatetime()),
++            ModelRequest(
++                parts=[UserPromptPart(content='Previous run prompt', timestamp=IsDatetime())],
++                timestamp=IsDatetime(),
++                run_id=previous_run_id,
++            ),
++            ModelResponse(
++                parts=[TextPart(content='Provider response')],
++                usage=RequestUsage(input_tokens=55, output_tokens=4),
++                model_name='function:capture_model_function:capture_model_stream_function',
++                timestamp=IsDatetime(),
++                run_id=IsStr(),
++            ),
++        ]
++    )
++
++    # The resumed request has a run_id from a different run: excluded from new_messages().
++    assert result.new_messages() == result.all_messages()[-1:]
++    assert result.new_messages()[0].run_id != previous_run_id
+ 
+ 
+ async def test_history_processor_deepcopy_resuming_without_prompt(
+@@ -1422,8 +1487,8 @@ async def test_history_processor_deepcopy_resuming_without_prompt(
+ ):
+     """
+     When a history processor deep-copies messages (breaking object identity),
+-    new_messages() should still exclude the resumed request and include only
+-    messages generated during this run.
++    new_messages() should still include the resumed request when it has the
++    current run_id.
+     """
+ 
+     def deepcopy_processor(messages: list[ModelMessage]) -> list[ModelMessage]:
+@@ -1449,6 +1514,7 @@ async def test_history_processor_deepcopy_resuming_without_prompt(
+                     )
+                 ],
+                 timestamp=IsDatetime(),
++                run_id=IsStr(),
+             ),
+             ModelResponse(
+                 parts=[TextPart(content='Provider response')],
+@@ -1460,7 +1526,7 @@ async def test_history_processor_deepcopy_resuming_without_prompt(
+         ]
+     )
+ 
+-    assert result.new_messages() == result.all_messages()[-1:]
++    assert result.new_messages() == result.all_messages()
+ 
+ 
+ async def test_history_processor_rebuild_resuming_without_prompt(
+@@ -1468,7 +1534,8 @@ async def test_history_processor_rebuild_resuming_without_prompt(
+ ):
+     """
+     When a history processor rebuilds `ModelRequest` instances with equivalent
+-    values, new_messages() should still exclude the resumed request.
++    values, new_messages() should include the resumed request when it has the
++    current run_id.
+     """
+ 
+     def rebuild_processor(messages: list[ModelMessage]) -> list[ModelMessage]:
+@@ -1522,6 +1589,7 @@ async def test_history_processor_rebuild_resuming_without_prompt(
+                     )
+                 ],
+                 timestamp=IsDatetime(),
++                run_id=IsStr(),
+             ),
+             ModelResponse(
+                 parts=[TextPart(content='Provider response')],
+@@ -1533,7 +1601,7 @@ async def test_history_processor_rebuild_resuming_without_prompt(
+         ]
+     )
+ 
+-    assert result.new_messages() == result.all_messages()[-1:]
++    assert result.new_messages() == result.all_messages()[-2:]
+ 
+ 
+ async def test_history_processor_replace_resumed_request_falls_through(
+diff --git a/tests/test_temporal.py b/tests/test_temporal.py
+index cf52044d..57decfc2 100644
+--- a/tests/test_temporal.py
++++ b/tests/test_temporal.py
+@@ -2153,6 +2153,7 @@ async def test_temporal_agent_with_hitl_tool(allow_model_requests: None, client:
+                     # but temporal tests fail when we use IsNow
+                     timestamp=IsDatetime(),
+                     instructions='Just call tools without asking for confirmation.',
++                    run_id=IsStr(),
+                 ),
+                 ModelResponse(
+                     parts=[
+diff --git a/tests/test_vercel_ai.py b/tests/test_vercel_ai.py
+index 8b4448bc..dbbef212 100644
+--- a/tests/test_vercel_ai.py
++++ b/tests/test_vercel_ai.py
+@@ -2324,6 +2324,7 @@ async def test_tool_approval_request_emission():
+                     )
+                 ],
+                 timestamp=IsDatetime(),
++                run_id=IsStr(),
+             ),
+             ModelResponse(
+                 parts=[ToolCallPart(tool_name='delete_file', args='{"path": "test.txt"}', tool_call_id='delete_1')],

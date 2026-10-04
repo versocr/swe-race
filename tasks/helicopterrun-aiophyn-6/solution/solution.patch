@@ -1,0 +1,94 @@
+diff --git a/aiophyn/api.py b/aiophyn/api.py
+index 5241e06..84335e7 100644
+--- a/aiophyn/api.py
++++ b/aiophyn/api.py
+@@ -186,44 +186,55 @@ async def _request(
+ 
+     async def async_authenticate(self) -> None:
+         """Authenticate the user and set the access token with its expiration."""
+-        if self._brand == BRANDS["kohler"]:
+-            if self._password is None:
+-                _LOGGER.info("Auhenticating to Kohler")
+-                self._partner_api = KOHLER_API(
+-                    self._username,
+-                    self._partner_password,
+-                    verify_ssl=self.verify_ssl,
+-                    proxy=self.proxy,
+-                    proxy_port=self.proxy_port,
++        async with self._auth_lock:
++            if self._brand == BRANDS["kohler"]:
++                if self._password is None:
++                    _LOGGER.info("Auhenticating to Kohler")
++                    self._partner_api = KOHLER_API(
++                        self._username,
++                        self._partner_password,
++                        verify_ssl=self.verify_ssl,
++                        proxy=self.proxy,
++                        proxy_port=self.proxy_port,
++                    )
++                    await self._partner_api.authenticate()
++                    self._password = self._partner_api.get_phyn_password()
++                    self._cognito = self._partner_api.get_cognito_info()
++                    self._mqtt_settings = self._partner_api.get_mqtt_info()
++
++            # Create a copy of cognito info to pass to thread to avoid shared mutable state
++            cognito_info = self._cognito.copy()
++            username = self._username
++            password = self._password
++
++            executor = ThreadPoolExecutor(max_workers=1)
++            try:
++                future = executor.submit(
++                    self._authenticate, cognito_info, username, password
+                 )
+-                await self._partner_api.authenticate()
+-                self._password = self._partner_api.get_phyn_password()
+-                self._cognito = self._partner_api.get_cognito_info()
+-                self._mqtt_settings = self._partner_api.get_mqtt_info()
+-
+-        executor = ThreadPoolExecutor()
+-        future = executor.submit(self._authenticate)
+-        auth_response = await asyncio.wrap_future(future)
+-
+-        access_token = auth_response["AuthenticationResult"]["AccessToken"]
+-        expires_in = auth_response["AuthenticationResult"]["ExpiresIn"]
+-        id_token = auth_response["AuthenticationResult"]["IdToken"]
+-        refresh_token = auth_response["AuthenticationResult"]["RefreshToken"]
+-
+-        self._token = access_token
+-        self._token_expiration = datetime.now() + timedelta(seconds=expires_in)
+-        self._id_token = id_token
+-        self._refresh_token = refresh_token
+-
+-    def _authenticate(self):
++                auth_response = await asyncio.wrap_future(future)
++            finally:
++                executor.shutdown(wait=True)
++
++            access_token = auth_response["AuthenticationResult"]["AccessToken"]
++            expires_in = auth_response["AuthenticationResult"]["ExpiresIn"]
++            id_token = auth_response["AuthenticationResult"]["IdToken"]
++            refresh_token = auth_response["AuthenticationResult"]["RefreshToken"]
++
++            self._token = access_token
++            self._token_expiration = datetime.now() + timedelta(seconds=expires_in)
++            self._id_token = id_token
++            self._refresh_token = refresh_token
++
++    def _authenticate(self, cognito_info, username, password):
+         """boto3 is synchronous, so authenticate in a separate thread."""
+         _LOGGER.info("Requesting token from AWS")
+-        client = boto3.client("cognito-idp", region_name=self._cognito["region"])
++        client = boto3.client("cognito-idp", region_name=cognito_info["region"])
+         aws = AWSSRP(
+-            username=self._username,
+-            password=self._password,
+-            pool_id=self._cognito["pool_id"],
+-            client_id=self._cognito["app_client_id"],
++            username=username,
++            password=password,
++            pool_id=cognito_info["pool_id"],
++            client_id=cognito_info["app_client_id"],
+             client=client,
+         )
+         auth_response = aws.authenticate_user()

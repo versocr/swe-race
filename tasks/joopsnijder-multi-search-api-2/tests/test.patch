@@ -1,0 +1,268 @@
+diff --git a/tests/conftest.py b/tests/conftest.py
+index 5444d1c..271c537 100644
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -1,6 +1,5 @@
+ """Pytest configuration and fixtures for multi-search-api tests."""
+ 
+-import json
+ import tempfile
+ from pathlib import Path
+ 
+diff --git a/tests/test_cache.py b/tests/test_cache.py
+index 2212dbf..e868d52 100644
+--- a/tests/test_cache.py
++++ b/tests/test_cache.py
+@@ -1,8 +1,8 @@
+ """Tests for search result caching."""
+ 
+-from datetime import datetime, timedelta
++import threading
++from datetime import timedelta
+ 
+-import pytest
+ from freezegun import freeze_time
+ 
+ from multi_search_api import SearchResultCache
+@@ -121,3 +121,155 @@ def test_cache_with_different_languages(search_cache, sample_search_results):
+ 
+     assert cached_en is not None
+     assert cached_nl is not None
++
++
++def test_concurrent_cache_writes(search_cache, sample_search_results):
++    """Test thread-safety with concurrent cache writes."""
++    num_threads = 10
++    queries_per_thread = 5
++    threads = []
++    errors = []
++
++    def cache_worker(thread_id):
++        try:
++            for i in range(queries_per_thread):
++                query = f"query_{thread_id}_{i}"
++                search_cache.cache_results(query, "provider", sample_search_results)
++        except Exception as e:
++            errors.append(e)
++
++    # Start multiple threads writing to cache
++    for i in range(num_threads):
++        thread = threading.Thread(target=cache_worker, args=(i,))
++        threads.append(thread)
++        thread.start()
++
++    # Wait for all threads to complete
++    for thread in threads:
++        thread.join()
++
++    # Check no errors occurred
++    assert len(errors) == 0, f"Errors occurred during concurrent writes: {errors}"
++
++    # Verify all entries were cached
++    assert len(search_cache.cache_data) == num_threads * queries_per_thread
++
++
++def test_concurrent_cache_reads_and_writes(search_cache, sample_search_results):
++    """Test thread-safety with concurrent reads and writes."""
++    num_writers = 5
++    num_readers = 5
++    iterations = 10
++    threads = []
++    errors = []
++
++    # Pre-populate some cache entries
++    for i in range(10):
++        search_cache.cache_results(f"initial_query_{i}", "provider", sample_search_results)
++
++    def write_worker(thread_id):
++        try:
++            for i in range(iterations):
++                query = f"write_query_{thread_id}_{i}"
++                search_cache.cache_results(query, "provider", sample_search_results)
++        except Exception as e:
++            errors.append(e)
++
++    def read_worker(thread_id):
++        try:
++            for i in range(iterations):
++                # Try to read existing entries
++                query = f"initial_query_{i % 10}"
++                search_cache.get_cached_results(query, "provider")
++        except Exception as e:
++            errors.append(e)
++
++    # Start writer threads
++    for i in range(num_writers):
++        thread = threading.Thread(target=write_worker, args=(i,))
++        threads.append(thread)
++        thread.start()
++
++    # Start reader threads
++    for i in range(num_readers):
++        thread = threading.Thread(target=read_worker, args=(i,))
++        threads.append(thread)
++        thread.start()
++
++    # Wait for all threads to complete
++    for thread in threads:
++        thread.join()
++
++    # Check no errors occurred
++    assert len(errors) == 0, f"Errors occurred during concurrent operations: {errors}"
++
++
++def test_concurrent_clear_expired_entries(search_cache, sample_search_results):
++    """Test thread-safety when clearing expired entries concurrently."""
++    num_threads = 5
++    threads = []
++    errors = []
++
++    # Add some entries
++    for i in range(20):
++        search_cache.cache_results(f"query_{i}", "provider", sample_search_results)
++
++    def clear_worker():
++        try:
++            search_cache.clear_expired_entries()
++        except Exception as e:
++            errors.append(e)
++
++    # Start multiple threads clearing expired entries
++    for _ in range(num_threads):
++        thread = threading.Thread(target=clear_worker)
++        threads.append(thread)
++        thread.start()
++
++    # Wait for all threads to complete
++    for thread in threads:
++        thread.join()
++
++    # Check no errors occurred
++    assert len(errors) == 0, f"Errors occurred during concurrent clear: {errors}"
++
++    # Verify cache is still consistent
++    assert isinstance(search_cache.cache_data, dict)
++
++
++def test_concurrent_get_cache_stats(search_cache, sample_search_results):
++    """Test thread-safety when getting cache stats concurrently."""
++    num_threads = 10
++    threads = []
++    errors = []
++    results = []
++
++    # Add some entries
++    for i in range(10):
++        search_cache.cache_results(f"query_{i}", "provider", sample_search_results)
++
++    def stats_worker():
++        try:
++            stats = search_cache.get_cache_stats()
++            results.append(stats)
++        except Exception as e:
++            errors.append(e)
++
++    # Start multiple threads getting stats
++    for _ in range(num_threads):
++        thread = threading.Thread(target=stats_worker)
++        threads.append(thread)
++        thread.start()
++
++    # Wait for all threads to complete
++    for thread in threads:
++        thread.join()
++
++    # Check no errors occurred
++    assert len(errors) == 0, f"Errors occurred during concurrent stats: {errors}"
++
++    # Verify all threads got valid stats
++    assert len(results) == num_threads
++    for stats in results:
++        assert "total_entries" in stats
++        assert stats["total_entries"] >= 0
+diff --git a/tests/test_providers.py b/tests/test_providers.py
+index 3f4eab3..9329dd8 100644
+--- a/tests/test_providers.py
++++ b/tests/test_providers.py
+@@ -49,9 +49,7 @@ def test_rate_limit_error(self):
+         """Test rate limit error handling."""
+         provider = SerperProvider(api_key="test_key")
+ 
+-        responses.add(
+-            responses.POST, "https://google.serper.dev/search", json={}, status=429
+-        )
++        responses.add(responses.POST, "https://google.serper.dev/search", json={}, status=429)
+ 
+         with pytest.raises(RateLimitError):
+             provider.search("test query")
+@@ -61,9 +59,7 @@ def test_payment_required_error(self):
+         """Test payment required error handling."""
+         provider = SerperProvider(api_key="test_key")
+ 
+-        responses.add(
+-            responses.POST, "https://google.serper.dev/search", json={}, status=402
+-        )
++        responses.add(responses.POST, "https://google.serper.dev/search", json={}, status=402)
+ 
+         with pytest.raises(RateLimitError):
+             provider.search("test query")
+diff --git a/tests/test_smart_search_tool.py b/tests/test_smart_search_tool.py
+index 7c6190d..ced68b3 100644
+--- a/tests/test_smart_search_tool.py
++++ b/tests/test_smart_search_tool.py
+@@ -1,11 +1,8 @@
+ """Tests for SmartSearchTool core functionality."""
+ 
+-import pytest
+-import responses
+ from freezegun import freeze_time
+ 
+ from multi_search_api import SmartSearchTool
+-from multi_search_api.exceptions import RateLimitError
+ 
+ 
+ class TestSmartSearchTool:
+@@ -43,9 +40,7 @@ def test_successful_search_with_cache(
+     ):
+         """Test successful search using cached results."""
+         # Pre-populate cache with results
+-        smart_search_tool_with_cache.cache.cache_results(
+-            "test query", "any", sample_search_results
+-        )
++        smart_search_tool_with_cache.cache.cache_results("test query", "any", sample_search_results)
+ 
+         result = smart_search_tool_with_cache.search("test query")
+ 
+@@ -57,9 +52,7 @@ def test_successful_search_with_cache(
+     def test_cache_hit(self, smart_search_tool_with_cache, sample_search_results):
+         """Test cache hit on second search."""
+         # Manually cache results
+-        smart_search_tool_with_cache.cache.cache_results(
+-            "test query", "any", sample_search_results
+-        )
++        smart_search_tool_with_cache.cache.cache_results("test query", "any", sample_search_results)
+ 
+         # Search should hit cache
+         result = smart_search_tool_with_cache.search("test query")
+@@ -98,9 +91,7 @@ def test_clear_cache(self, smart_search_tool_with_cache, sample_search_results):
+         """Test cache clearing."""
+         # Add cached results at a specific time
+         with freeze_time("2025-01-01 12:00:00"):
+-            smart_search_tool_with_cache.cache.cache_results(
+-                "query1", "any", sample_search_results
+-            )
++            smart_search_tool_with_cache.cache.cache_results("query1", "any", sample_search_results)
+ 
+         # Cache should have entries
+         assert len(smart_search_tool_with_cache.cache.cache_data) > 0
+@@ -145,9 +136,7 @@ def test_run_method_crewai_compatible(
+     ):
+         """Test CrewAI-compatible run method."""
+         # Pre-populate cache
+-        smart_search_tool_with_cache.cache.cache_results(
+-            "test query", "any", sample_search_results
+-        )
++        smart_search_tool_with_cache.cache.cache_results("test query", "any", sample_search_results)
+ 
+         result = smart_search_tool_with_cache.run("test query")
+ 

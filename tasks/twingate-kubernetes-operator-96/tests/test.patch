@@ -1,0 +1,568 @@
+diff --git a/app/handlers/tests/test_handlers_connector.py b/app/handlers/tests/test_handlers_connector.py
+index 393b6839..73b203bb 100644
+--- a/app/handlers/tests/test_handlers_connector.py
++++ b/app/handlers/tests/test_handlers_connector.py
+@@ -28,6 +28,14 @@ def mock_connector_spec_get_image():
+         yield mock_get_image
+ 
+ 
++@pytest.fixture()
++def mock_api_client():
++    api_client_instance = MagicMock()
++    with patch("app.handlers.handlers_connectors.TwingateAPIClient") as mock_api_client:
++        mock_api_client.return_value = api_client_instance
++        yield api_client_instance
++
++
+ @pytest.fixture()
+ def get_connector_and_crd(connector_factory):
+     def get(*, spec_overrides=None, status=None, with_id=False, annotations=None):
+@@ -56,15 +64,16 @@ def get(*, spec_overrides=None, status=None, with_id=False, annotations=None):
+     return get
+ 
+ 
+-def test_twingate_connector_create(get_connector_and_crd, kopf_handler_runner):
++def test_twingate_connector_create(
++    get_connector_and_crd, kopf_handler_runner, mock_api_client
++):
+     connector, crd = get_connector_and_crd()
+ 
+-    memo_mock = MagicMock()
+-    memo_mock.twingate_client.connector_create.return_value = connector
+-    memo_mock.twingate_client.connector_generate_tokens.return_value = ConnectorTokens(
++    mock_api_client.connector_create.return_value = connector
++    mock_api_client.connector_generate_tokens.return_value = ConnectorTokens(
+         access_token="at", refresh_token="rt"  # nosec
+     )
+-    run = kopf_handler_runner(twingate_connector_create, crd, memo_mock)
++    run = kopf_handler_runner(twingate_connector_create, crd, MagicMock())
+ 
+     assert run.result == {
+         "success": True,
+@@ -105,19 +114,18 @@ def test_twingate_connector_create(get_connector_and_crd, kopf_handler_runner):
+ 
+ 
+ def test_twingate_connector_create_with_imagepolicy_sets_check_annotation(
+-    get_connector_and_crd, kopf_handler_runner
++    get_connector_and_crd, kopf_handler_runner, mock_api_client
+ ):
+     connector, crd = get_connector_and_crd(
+         spec_overrides=dict(image_policy=ConnectorImagePolicy())
+     )
+ 
+-    memo_mock = MagicMock()
+-    memo_mock.twingate_client.connector_create.return_value = connector
+-    memo_mock.twingate_client.connector_generate_tokens.return_value = ConnectorTokens(
++    mock_api_client.connector_create.return_value = connector
++    mock_api_client.connector_generate_tokens.return_value = ConnectorTokens(
+         access_token="at", refresh_token="rt"  # nosec
+     )
+ 
+-    run = kopf_handler_runner(twingate_connector_create, crd, memo_mock)
++    run = kopf_handler_runner(twingate_connector_create, crd, MagicMock())
+     assert run.result == {
+         "success": True,
+         "twingate_id": connector.id,
+@@ -254,7 +262,7 @@ def test_twingate_connector_recreate_pod(get_connector_and_crd, kopf_handler_run
+ 
+ 
+ def test_twingate_connector_delete_deletes_connector(
+-    get_connector_and_crd, kopf_handler_runner
++    get_connector_and_crd, kopf_handler_runner, mock_api_client
+ ):
+     connector, crd = get_connector_and_crd(
+         status={"twingate_connector_create": {"success": True}}, with_id=True
+@@ -262,7 +270,7 @@ def test_twingate_connector_delete_deletes_connector(
+     run = kopf_handler_runner(twingate_connector_delete, crd, MagicMock())
+ 
+     run.logger_mock.exception.assert_not_called()
+-    run.memo_mock.twingate_client.connector_delete.assert_called_once()
++    mock_api_client.connector_delete.assert_called_once()
+     run.k8s_client_mock.patch_namespaced_pod.assert_called_once_with(
+         crd.spec.name,
+         "default",
+@@ -271,7 +279,7 @@ def test_twingate_connector_delete_deletes_connector(
+ 
+ 
+ def test_twingate_connector_delete_ignores_k8s_api_errors(
+-    get_connector_and_crd, kopf_handler_runner, k8s_client_mock
++    get_connector_and_crd, kopf_handler_runner, k8s_client_mock, mock_api_client
+ ):
+     connector, crd = get_connector_and_crd(
+         status={"twingate_connector_create": {"success": True}}, with_id=True
+@@ -284,7 +292,7 @@ def test_twingate_connector_delete_ignores_k8s_api_errors(
+     run = kopf_handler_runner(twingate_connector_delete, crd, MagicMock())
+ 
+     run.logger_mock.exception.assert_called_once()
+-    run.memo_mock.twingate_client.connector_delete.assert_called_once()
++    mock_api_client.connector_delete.assert_called_once()
+     run.k8s_client_mock.patch_namespaced_pod.assert_called_once_with(
+         crd.spec.name,
+         "default",
+@@ -293,11 +301,11 @@ def test_twingate_connector_delete_ignores_k8s_api_errors(
+ 
+ 
+ def test_twingate_connector_delete_without_status_does_nothing(
+-    get_connector_and_crd, kopf_handler_runner
++    get_connector_and_crd, kopf_handler_runner, mock_api_client
+ ):
+     connector, crd = get_connector_and_crd()
+-    run = kopf_handler_runner(twingate_connector_delete, crd, MagicMock())
+-    run.memo_mock.twingate_client.connector_delete.assert_not_called()
++    kopf_handler_runner(twingate_connector_delete, crd, MagicMock())
++    mock_api_client.connector_delete.assert_not_called()
+ 
+ 
+ def test_twingate_connector_pod_deleted_tags_owner(get_connector_and_crd):
+diff --git a/app/handlers/tests/test_handlers_resource.py b/app/handlers/tests/test_handlers_resource.py
+index 8cf94e3b..d09c49b2 100644
+--- a/app/handlers/tests/test_handlers_resource.py
++++ b/app/handlers/tests/test_handlers_resource.py
+@@ -1,4 +1,6 @@
+-from unittest.mock import ANY, MagicMock
++from unittest.mock import ANY, MagicMock, patch
++
++import pytest
+ 
+ from app.crds import ResourceSpec
+ from app.handlers.handlers_resource import (
+@@ -9,8 +11,16 @@
+ )
+ 
+ 
++@pytest.fixture()
++def mock_api_client():
++    api_client_instance = MagicMock()
++    with patch("app.handlers.handlers_resource.TwingateAPIClient") as mock_api_client:
++        mock_api_client.return_value = api_client_instance
++        yield api_client_instance
++
++
+ class TestResourceCreateHandler:
+-    def test_create(self, resource_factory, kopf_info_mock):
++    def test_create(self, resource_factory, kopf_info_mock, mock_api_client):
+         resource = resource_factory()
+         resource_spec = resource.to_spec(id=None)
+ 
+@@ -18,10 +28,11 @@ def test_create(self, resource_factory, kopf_info_mock):
+ 
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.resource_create.return_value = resource
+         patch_mock = MagicMock()
+         patch_mock.spec = {}
+ 
++        mock_api_client.resource_create.return_value = resource
++
+         result = twingate_resource_create(
+             body="", spec=spec, memo=memo_mock, logger=logger_mock, patch=patch_mock
+         )
+@@ -33,8 +44,8 @@ def test_create(self, resource_factory, kopf_info_mock):
+             "ts": ANY,
+         }
+ 
++        mock_api_client.resource_create.assert_called_once_with(resource_spec)
+         logger_mock.info.assert_called_once_with("Got a create request: %s", spec)
+-        memo_mock.twingate_client.resource_create.assert_called_once_with(resource_spec)
+         kopf_info_mock.assert_called_once_with(
+             "", reason="Success", message=f"Created on Twingate as {resource.id}"
+         )
+@@ -42,7 +53,7 @@ def test_create(self, resource_factory, kopf_info_mock):
+ 
+ 
+ class TestResourceUpdateHandler:
+-    def test_update(self):
++    def test_update(self, mock_api_client):
+         rid = "UmVzb3VyY2U6OTMxODE3"
+         old = {
+             "spec": {
+@@ -68,9 +79,10 @@ def test_update(self):
+         }
+         new_resource_spec = ResourceSpec(**new["spec"])
+ 
++        mock_api_client.resource_update.return_value = MagicMock(id=rid)
++
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.resource_update.return_value = MagicMock(id=rid)
+         patch_mock = MagicMock()
+         patch_mock.spec = {}
+ 
+@@ -85,14 +97,12 @@ def test_update(self):
+             "ts": ANY,
+         }
+ 
+-        memo_mock.twingate_client.resource_update.assert_called_once_with(
+-            new_resource_spec
+-        )
++        mock_api_client.resource_update.assert_called_once_with(new_resource_spec)
+         assert patch_mock.spec == {}
+ 
+ 
+ class TestResourceDeleteHandler:
+-    def test_delete(self):
++    def test_delete(self, mock_api_client):
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+ 
+@@ -109,9 +119,9 @@ def test_delete(self):
+             logger_mock,
+         )
+ 
+-        memo_mock.twingate_client.resource_delete.assert_called_once_with("test-id")
++        mock_api_client.resource_delete.assert_called_once_with("test-id")
+ 
+-    def test_delete_without_status_does_nothing(self):
++    def test_delete_without_status_does_nothing(self, mock_api_client):
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+ 
+@@ -119,9 +129,9 @@ def test_delete_without_status_does_nothing(self):
+ 
+         twingate_resource_delete(spec, {}, memo_mock, logger_mock)
+ 
+-        memo_mock.twingate_client.resource_delete.assert_not_called()
++        mock_api_client.resource_delete.assert_not_called()
+ 
+-    def test_delete_without_twingate_id_does_nothing(self):
++    def test_delete_without_twingate_id_does_nothing(self, mock_api_client):
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+ 
+@@ -129,11 +139,13 @@ def test_delete_without_twingate_id_does_nothing(self):
+ 
+         twingate_resource_delete(spec, {"foo": "bar"}, memo_mock, logger_mock)
+ 
+-        memo_mock.twingate_client.resource_delete.assert_not_called()
++        mock_api_client.resource_delete.assert_not_called()
+ 
+ 
+ class TestResourceSyncTimer:
+-    def test_sync_when_resource_exists_and_doesnt_need_update(self, resource_factory):
++    def test_sync_when_resource_exists_and_doesnt_need_update(
++        self, resource_factory, mock_api_client
++    ):
+         resource = resource_factory()
+         resource_spec = resource.to_spec()
+         status = {
+@@ -157,10 +169,12 @@ def test_sync_when_resource_exists_and_doesnt_need_update(self, resource_factory
+             patch_mock,
+         )
+ 
+-        memo_mock.twingate_client.resource_update.assert_not_called()
++        mock_api_client.resource_update.assert_not_called()
+         assert patch_mock.spec == {}
+ 
+-    def test_sync_when_resource_exists_and_requires_update(self, resource_factory):
++    def test_sync_when_resource_exists_and_requires_update(
++        self, resource_factory, mock_api_client
++    ):
+         resource = resource_factory()
+         resource_spec = resource.to_spec()
+         status = {
+@@ -173,9 +187,10 @@ def test_sync_when_resource_exists_and_requires_update(self, resource_factory):
+ 
+         mutated_resource = resource.model_copy(update={"name": "new-name"})
+ 
++        mock_api_client.get_resource.return_value = mutated_resource
++
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.get_resource.return_value = mutated_resource
+         patch_mock = MagicMock()
+         patch_mock.spec = {}
+ 
+@@ -187,10 +202,12 @@ def test_sync_when_resource_exists_and_requires_update(self, resource_factory):
+             patch_mock,
+         )
+ 
+-        memo_mock.twingate_client.resource_update.assert_called_once_with(resource_spec)
++        mock_api_client.resource_update.assert_called_once_with(resource_spec)
+         assert patch_mock.spec == {}
+ 
+-    def test_sync_when_resource_doesnt_exists_recreate_it(self, resource_factory):
++    def test_sync_when_resource_doesnt_exists_recreate_it(
++        self, resource_factory, mock_api_client
++    ):
+         resource = resource_factory()
+         resource_spec = resource.to_spec()
+         resource_spec_without_id = resource_spec.model_copy(update={"id": None})
+@@ -202,10 +219,11 @@ def test_sync_when_resource_doesnt_exists_recreate_it(self, resource_factory):
+             }
+         }
+ 
++        mock_api_client.get_resource.return_value = None
++        mock_api_client.resource_create.return_value = resource
++
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.get_resource.return_value = None
+-        memo_mock.twingate_client.resource_create.return_value = resource
+         patch_mock = MagicMock()
+         patch_mock.spec = {}
+ 
+@@ -217,8 +235,8 @@ def test_sync_when_resource_doesnt_exists_recreate_it(self, resource_factory):
+             patch_mock,
+         )
+ 
+-        memo_mock.twingate_client.resource_update.assert_not_called()
+-        memo_mock.twingate_client.resource_create.assert_called_once_with(
++        mock_api_client.resource_update.assert_not_called()
++        mock_api_client.resource_create.assert_called_once_with(
+             resource_spec_without_id
+         )
+ 
+diff --git a/app/handlers/tests/test_handlers_resource_access.py b/app/handlers/tests/test_handlers_resource_access.py
+index f3081fa7..0ba79f78 100644
+--- a/app/handlers/tests/test_handlers_resource_access.py
++++ b/app/handlers/tests/test_handlers_resource_access.py
+@@ -13,8 +13,18 @@
+ )
+ 
+ 
++@pytest.fixture()
++def mock_api_client():
++    api_client_instance = MagicMock()
++    with patch(
++        "app.handlers.handlers_resource_access.TwingateAPIClient"
++    ) as mock_api_client:
++        mock_api_client.return_value = api_client_instance
++        yield api_client_instance
++
++
+ class TestResourceAccessCreateHandler:
+-    def test_create_success(self, resource_factory, kopf_info_mock):
++    def test_create_success(self, resource_factory, kopf_info_mock, mock_api_client):
+         resource = resource_factory()
+         resource_spec = resource.to_spec()
+ 
+@@ -23,9 +33,10 @@ def test_create_success(self, resource_factory, kopf_info_mock):
+             "principalId": "R3JvdXA6MTE1NzI2MA==",
+         }
+ 
++        mock_api_client.resource_access_add.return_value = True
++
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.resource_access_add.return_value = True
+         patch_mock = MagicMock()
+         patch_mock.metadata = {}
+         patch_mock.metadata["ownerReferences"] = []
+@@ -57,15 +68,16 @@ def test_create_success(self, resource_factory, kopf_info_mock):
+             }
+         ]
+ 
+-    def test_create_invalid_ref(self):
++    def test_create_invalid_ref(self, mock_api_client):
+         resource_access_spec = {
+             "resourceRef": {"name": "invalid"},
+             "principalId": "R3JvdXA6MTE1NzI2MA==",
+         }
+ 
++        mock_api_client.resource_access_add.return_value = True
++
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.resource_access_add.return_value = True
+         patch_mock = MagicMock()
+ 
+         with patch(
+@@ -91,7 +103,7 @@ def test_create_invalid_ref(self):
+                 message="Resource default/invalid not found",
+             )
+ 
+-    def test_create_resource_no_id(self, resource_factory):
++    def test_create_resource_no_id(self, resource_factory, mock_api_client):
+         resource = resource_factory()
+         resource_spec = resource.to_spec(id=None)
+ 
+@@ -100,9 +112,10 @@ def test_create_resource_no_id(self, resource_factory):
+             "principalId": "R3JvdXA6MTE1NzI2MA==",
+         }
+ 
++        mock_api_client.resource_access_add.return_value = True
++
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.resource_access_add.return_value = True
+         patch_mock = MagicMock()
+ 
+         resource_crd_mock = MagicMock()
+@@ -121,7 +134,7 @@ def test_create_resource_no_id(self, resource_factory):
+                 patch=patch_mock,
+             )
+ 
+-    def test_create_graphql_error_returns_it(self, resource_factory):
++    def test_create_graphql_error_returns_it(self, resource_factory, mock_api_client):
+         resource = resource_factory()
+         resource_spec = resource.to_spec()
+ 
+@@ -130,11 +143,12 @@ def test_create_graphql_error_returns_it(self, resource_factory):
+             "principalId": "R3JvdXA6MTE1NzI2MA==",
+         }
+ 
++        mock_api_client.resource_access_add.side_effect = GraphQLMutationError(
++            "resourceCreate", "some error"
++        )
++
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.resource_access_add.side_effect = (
+-            GraphQLMutationError("resourceCreate", "some error")
+-        )
+         patch_mock = MagicMock()
+         patch_mock.metadata = {}
+         patch_mock.metadata["ownerReferences"] = []
+@@ -163,7 +177,7 @@ def test_create_graphql_error_returns_it(self, resource_factory):
+ 
+ 
+ class TestResourceAccessUpdateHandler:
+-    def test_update_success(self, resource_factory):
++    def test_update_success(self, resource_factory, mock_api_client):
+         resource = resource_factory()
+         resource_spec = resource.to_spec()
+ 
+@@ -175,7 +189,8 @@ def test_update_success(self, resource_factory):
+ 
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.resource_access_add.return_value = True
++
++        mock_api_client.resource_access_add.return_value = True
+ 
+         resource_crd_mock = MagicMock()
+         resource_crd_mock.spec = resource_spec
+@@ -194,7 +209,7 @@ def test_update_success(self, resource_factory):
+             )
+             assert result == {"success": True, "ts": ANY}
+ 
+-    def test_update_fails_to_find_resource(self):
++    def test_update_fails_to_find_resource(self, mock_api_client):
+         resource_access_spec = {
+             "resourceRef": {"name": "doesnt-exist"},
+             "principalId": "R3JvdXA6MTE1NzI2MA==",
+@@ -203,7 +218,8 @@ def test_update_fails_to_find_resource(self):
+ 
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.resource_access_add.return_value = True
++
++        mock_api_client.resource_access_add.return_value = True
+ 
+         with patch(
+             "app.handlers.handlers_resource_access.ResourceAccessSpec.get_resource",
+@@ -238,7 +254,7 @@ def test_update_resource_not_yet_created_should_raise_temp_error(self):
+ 
+ 
+ class TestResourceAccessDelete:
+-    def test_delete_success(self, resource_factory):
++    def test_delete_success(self, resource_factory, mock_api_client):
+         resource = resource_factory()
+         resource_spec = resource.to_spec()
+ 
+@@ -249,7 +265,8 @@ def test_delete_success(self, resource_factory):
+ 
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.resource_access_remove.return_value = True
++
++        mock_api_client.resource_access_remove.return_value = True
+ 
+         resource_crd_mock = MagicMock()
+         resource_crd_mock.spec = resource_spec
+@@ -263,7 +280,7 @@ def test_delete_success(self, resource_factory):
+                 resource_access_spec, {}, memo_mock, logger_mock
+             )
+ 
+-    def test_delete_resource_doesnt_exist_does_nothing(self):
++    def test_delete_resource_doesnt_exist_does_nothing(self, mock_api_client):
+         resource_access_spec = {
+             "resourceRef": {"name": "doesnt-exist"},
+             "principalId": "R3JvdXA6MTE1NzI2MA==",
+@@ -280,11 +297,11 @@ def test_delete_resource_doesnt_exist_does_nothing(self):
+                 resource_access_spec, {}, memo_mock, logger_mock
+             )
+ 
+-        memo_mock.twingate_client.resource_access_remove.assert_not_called()
++        mock_api_client.resource_access_remove.assert_not_called()
+ 
+ 
+ class TestResourceAccessSync:
+-    def test_sync_success(self, resource_factory):
++    def test_sync_success(self, resource_factory, mock_api_client):
+         resource = resource_factory()
+         resource_spec = resource.to_spec()
+ 
+@@ -295,7 +312,8 @@ def test_sync_success(self, resource_factory):
+ 
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.resource_access_add.return_value = True
++
++        mock_api_client.resource_access_add.return_value = True
+ 
+         resource_crd_mock = MagicMock()
+         resource_crd_mock.spec = resource_spec
+@@ -315,7 +333,7 @@ def test_sync_success(self, resource_factory):
+ 
+             assert result == {"success": True, "ts": ANY}
+ 
+-    def test_sync_api_fails(self, resource_factory):
++    def test_sync_api_fails(self, resource_factory, mock_api_client):
+         resource = resource_factory()
+         resource_spec = resource.to_spec()
+ 
+@@ -326,8 +344,9 @@ def test_sync_api_fails(self, resource_factory):
+ 
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.resource_access_add.side_effect = (
+-            GraphQLMutationError("resourceAccessAdd", "some error")
++
++        mock_api_client.resource_access_add.side_effect = GraphQLMutationError(
++            "resourceAccessAdd", "some error"
+         )
+ 
+         resource_crd_mock = MagicMock()
+@@ -350,7 +369,9 @@ def test_sync_api_fails(self, resource_factory):
+ 
+         kopf_exception_mock.assert_called_once_with("", reason="Failure", message=ANY)
+ 
+-    def test_sync_resource_not_found_should_warn(self, resource_factory):
++    def test_sync_resource_not_found_should_warn(
++        self, resource_factory, mock_api_client
++    ):
+         resource = resource_factory()
+         resource.to_spec()
+ 
+@@ -361,7 +382,8 @@ def test_sync_resource_not_found_should_warn(self, resource_factory):
+ 
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.get_resource.return_value = None
++
++        mock_api_client.get_resource.return_value = None
+ 
+         expected_err = "Resource default/impossible not found"
+ 
+@@ -382,7 +404,9 @@ def test_sync_resource_not_found_should_warn(self, resource_factory):
+             "", reason="ResourceNotFound", message=expected_err
+         )
+ 
+-    def test_sync_resource_spec_missing_id_should_skip(self, resource_factory):
++    def test_sync_resource_spec_missing_id_should_skip(
++        self, resource_factory, mock_api_client
++    ):
+         resource = resource_factory()
+         resource_spec = resource.to_spec(id=None)
+ 
+@@ -393,7 +417,8 @@ def test_sync_resource_spec_missing_id_should_skip(self, resource_factory):
+ 
+         logger_mock = MagicMock()
+         memo_mock = MagicMock()
+-        memo_mock.twingate_client.get_resource.return_value = resource
++
++        mock_api_client.get_resource.return_value = resource
+ 
+         resource_crd_mock = MagicMock()
+         resource_crd_mock.spec = resource_spec

@@ -1,0 +1,277 @@
+diff --git a/celery/backends/asynchronous.py b/celery/backends/asynchronous.py
+index 0413afecc8a..c5f292ceb6e 100644
+--- a/celery/backends/asynchronous.py
++++ b/celery/backends/asynchronous.py
+@@ -5,6 +5,7 @@
+ import threading
+ import time
+ from collections import deque
++from contextlib import contextmanager
+ from queue import Empty
+ from time import sleep
+ from weakref import WeakKeyDictionary
+@@ -13,10 +14,18 @@
+ 
+ from celery import states
+ from celery.exceptions import TimeoutError
++from celery.utils.log import get_logger
+ from celery.utils.threads import THREAD_TIMEOUT_MAX
+ 
+ E_CELERY_RESTART_REQUIRED = "Celery must be restarted because a shutdown signal was detected."
+ 
++E_RETRY_LIMIT_EXCEEDED = """
++Retry limit exceeded while trying to reconnect to the Celery result store
++backend. The Celery application must be restarted.
++"""
++
++logger = get_logger(__name__)
++
+ __all__ = (
+     'AsyncBackendMixin', 'BaseResultConsumer', 'Drainer',
+     'register_drainer',
+@@ -307,6 +316,11 @@ def is_async(self):
+ class BaseResultConsumer:
+     """Manager responsible for consuming result messages."""
+ 
++    #: Tuple of transport-layer exceptions that signal a lost connection.
++    #: Subclasses should override this with the appropriate exception types
++    #: so that :meth:`reconnect_on_error` can catch and recover from them.
++    _connection_errors = ()
++
+     def __init__(self, backend, app, accept,
+                  pending_results, pending_messages):
+         self.backend = backend
+@@ -321,6 +335,34 @@ def __init__(self, backend, app, accept,
+     def start(self, initial_task_id, **kwargs):
+         raise NotImplementedError()
+ 
++    @contextmanager
++    def reconnect_on_error(self):
++        """Context manager that catches connection errors and reconnects.
++
++        Wraps a block of code so that any :attr:`_connection_errors` raised
++        inside it trigger a call to :meth:`_reconnect`.  If reconnection
++        itself raises a connection error the consumer is considered
++        unrecoverable and a :exc:`RuntimeError` is raised to signal that
++        the Celery application must be restarted.
++        """
++        try:
++            yield
++        except self._connection_errors:
++            try:
++                self._reconnect()
++            except self._connection_errors as exc:
++                logger.critical(E_RETRY_LIMIT_EXCEEDED)
++                raise RuntimeError(E_RETRY_LIMIT_EXCEEDED) from exc
++
++    def _reconnect(self):
++        """Re-establish the backend connection.
++
++        Subclasses must override this method to perform the transport-specific
++        reconnection logic that should be executed when a connection error is
++        caught by :meth:`reconnect_on_error`.
++        """
++        pass
++
+     def stop(self):
+         pass
+ 
+diff --git a/celery/backends/redis.py b/celery/backends/redis.py
+index 4e8c2d901a0..25fae609f67 100644
+--- a/celery/backends/redis.py
++++ b/celery/backends/redis.py
+@@ -1,6 +1,5 @@
+ """Redis result store backend."""
+ import time
+-from contextlib import contextmanager
+ from functools import partial
+ from ssl import CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED
+ from urllib.parse import unquote
+@@ -72,11 +71,6 @@
+ 
+ E_LOST = 'Connection to Redis lost: Retry (%s/%s) %s.'
+ 
+-E_RETRY_LIMIT_EXCEEDED = """
+-Retry limit exceeded while trying to reconnect to the Celery redis result \
+-store backend. The Celery application must be restarted.
+-"""
+-
+ logger = get_logger(__name__)
+ 
+ 
+@@ -122,16 +116,9 @@ def _reconnect_pubsub(self):
+             # The on_connect callback will re-subscribe to any channels we previously subscribed to.
+             self._pubsub.connection.register_connect_callback(self._pubsub.on_connect)
+ 
+-    @contextmanager
+-    def reconnect_on_error(self):
+-        try:
+-            yield
+-        except self._connection_errors:
+-            try:
+-                self._ensure(self._reconnect_pubsub, ())
+-            except self._connection_errors as e:
+-                logger.critical(E_RETRY_LIMIT_EXCEEDED)
+-                raise RuntimeError(E_RETRY_LIMIT_EXCEEDED) from e
++    def _reconnect(self):
++        """Re-establish the Redis pub/sub connection with retry."""
++        self._ensure(self._reconnect_pubsub, ())
+ 
+     def _maybe_cancel_ready_task(self, meta):
+         if meta['status'] in states.READY_STATES:
+diff --git a/celery/backends/rpc.py b/celery/backends/rpc.py
+index 42fef2072c5..577eb7d404f 100644
+--- a/celery/backends/rpc.py
++++ b/celery/backends/rpc.py
+@@ -4,7 +4,6 @@
+ """
+ import logging
+ import time
+-from contextlib import contextmanager
+ 
+ import kombu
+ from kombu.common import maybe_declare
+@@ -53,6 +52,10 @@ def __init__(self, *args, **kwargs):
+     def start(self, initial_task_id, no_ack=True, **kwargs):
+         self._no_ack = no_ack
+         self._connection = self.app.connection()
++        self._connection_errors = (
++            self._connection.connection_errors
++            + self._connection.channel_errors
++        )
+         initial_queue = self._create_binding(initial_task_id)
+         self._consumer = self.Consumer(
+             self._connection.default_channel, [initial_queue],
+@@ -60,22 +63,9 @@ def start(self, initial_task_id, no_ack=True, **kwargs):
+             accept=self.accept)
+         self._consumer.consume()
+ 
+-    @contextmanager
+-    def _handle_connection_errors(self):
+-        """Context manager that catches broker connection/channel errors and reconnects."""
+-        try:
+-            yield
+-        except (self._connection.connection_errors
+-                + self._connection.channel_errors) as exc:
+-            logger.warning(
+-                'RPC result consumer: connection lost (%s), '
+-                'attempting to reconnect...', exc,
+-            )
+-            self._reconnect()
+-
+     def drain_events(self, timeout=None):
+         if self._connection:
+-            with self._handle_connection_errors():
++            with self.reconnect_on_error():
+                 return self._connection.drain_events(timeout=timeout)
+         elif timeout:
+             time.sleep(timeout)
+@@ -86,6 +76,10 @@ def _reconnect(self):
+         Re-subscribes to every queue that the old consumer was listening on
+         so that pending results can still be drained.
+         """
++        logger.warning(
++            'RPC result consumer: connection lost, attempting to reconnect...',
++            exc_info=True,
++        )
+         old_queues = []
+         if self._consumer is not None:
+             old_queues = list(self._consumer.queues)
+@@ -111,6 +105,10 @@ def _reconnect(self):
+ 
+         # Establish a fresh connection and consumer.
+         self._connection = self.app.connection()
++        self._connection_errors = (
++            self._connection.connection_errors
++            + self._connection.channel_errors
++        )
+         self._consumer = self.Consumer(
+             self._connection.default_channel,
+             old_queues,
+diff --git a/celery/backends/redis.py b/celery/backends/redis.py
+index 25fae609f67..898aa3774b1 100644
+--- a/celery/backends/redis.py
++++ b/celery/backends/redis.py
+@@ -309,6 +309,48 @@ def __init__(self, host=None, port=None, db=None, password=None,
+         self.connection_errors, self.channel_errors = (
+             get_redis_error_classes() if get_redis_error_classes
+             else ((), ()))
++        transport_options = self.app.conf.get(
++            'result_backend_transport_options', {})
++        additional = transport_options.get(
++            'additional_connection_errors', ())
++        if additional is None:
++            additional = ()
++        elif isinstance(additional, (str, type)):
++            additional = (additional,)
++        else:
++            try:
++                iter(additional)
++            except TypeError:
++                additional = (additional,)
++        if additional:
++            extra = []
++            for cls in additional:
++                try:
++                    resolved = (
++                        symbol_by_name(cls)
++                        if isinstance(cls, str) else cls
++                    )
++                except (ImportError, AttributeError) as exc:
++                    logger.warning(
++                        'Ignoring unresolvable'
++                        ' additional_connection_errors'
++                        ' entry %r: %r', cls, exc,
++                    )
++                    continue
++                if (isinstance(resolved, type)
++                        and issubclass(resolved, Exception)):
++                    extra.append(resolved)
++                else:
++                    logger.warning(
++                        'Ignoring invalid additional_connection_errors'
++                        ' entry %r (resolved: %r): expected an'
++                        ' exception class or dotted path to one.',
++                        cls, resolved,
++                    )
++            if extra:
++                self.connection_errors = (
++                    self.connection_errors + tuple(extra)
++                )
+         self.result_consumer = self.ResultConsumer(
+             self, self.app, self.accept,
+             self._pending_results, self._pending_messages,
+diff --git a/docs/getting-started/backends-and-brokers/redis.rst b/docs/getting-started/backends-and-brokers/redis.rst
+index a618488fd5c..c33d8dcf0d4 100644
+--- a/docs/getting-started/backends-and-brokers/redis.rst
++++ b/docs/getting-started/backends-and-brokers/redis.rst
+@@ -143,6 +143,29 @@ To configure the connection timeouts for the Redis result backend, use the ``ret
+ 
+ See :func:`~kombu.utils.functional.retry_over_time` for the possible retry policy options.
+ 
++.. _redis-result-backend-additional-connection-errors:
++
++Additional connection errors
++^^^^^^^^^^^^^^^^^^^^^^^^^^^^
++
++.. versionadded:: 5.7
++
++Some Redis proxies or cloud providers may raise custom exceptions that Celery
++does not recognize as connection errors. To have these retried automatically,
++use the ``additional_connection_errors`` key under
++:setting:`result_backend_transport_options`:
++
++
++.. code-block:: python
++
++    app.conf.result_backend_transport_options = {
++        'additional_connection_errors': (
++            'my_redis_proxy.CustomConnectionError',
++        ),
++    }
++
++Both dotted import strings and exception classes are supported.
++
+ .. _redis-serverless:
+ 
+ Serverless

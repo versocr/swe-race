@@ -1,0 +1,338 @@
+diff --git a/celery/backends/asynchronous.py b/celery/backends/asynchronous.py
+index a5e0e5d4036..0413afecc8a 100644
+--- a/celery/backends/asynchronous.py
++++ b/celery/backends/asynchronous.py
+@@ -79,6 +79,18 @@ def drain_events_until(self, p, timeout=None, interval=1, on_interval=None, wait
+                 yield self.wait_for(p, wait, timeout=interval)
+             except socket.timeout:
+                 pass
++            except OSError:
++                # Recoverable connection error (e.g. broker restart).
++                # drain_events handles reconnection internally; if an
++                # OSError still leaks through, we log, sleep for one
++                # interval, and continue rather than spinning hot.
++                logging.warning(
++                    'Drainer: connection error during drain_events, '
++                    'will retry on next loop iteration.',
++                    exc_info=True,
++                )
++                time.sleep(interval)
++
+             if on_interval:
+                 on_interval()
+             if p.ready:  # got event on the wanted channel.
+@@ -119,6 +131,17 @@ def run(self):
+                     self._send_drain_complete_event()
+                 except socket.timeout:
+                     pass
++                except OSError:
++                    # Recoverable connection errors (e.g. broker restart)
++                    # are handled inside drain_events via reconnection.
++                    # If something still leaks through, we log, back off
++                    # briefly, and retry instead of spinning hot.
++                    logging.warning(
++                        'Drainer: connection error during drain_events, '
++                        'will retry on next loop iteration.',
++                        exc_info=True,
++                    )
++                    time.sleep(1)
+         except Exception as e:
+             self._exc = e
+             raise
+diff --git a/celery/backends/rpc.py b/celery/backends/rpc.py
+index 927c7f517fa..42fef2072c5 100644
+--- a/celery/backends/rpc.py
++++ b/celery/backends/rpc.py
+@@ -2,7 +2,9 @@
+ 
+ RPC-style result backend, using reply-to and one queue per client.
+ """
++import logging
+ import time
++from contextlib import contextmanager
+ 
+ import kombu
+ from kombu.common import maybe_declare
+@@ -17,6 +19,8 @@
+ 
+ __all__ = ('BacklogLimitExceeded', 'RPCBackend')
+ 
++logger = logging.getLogger(__name__)
++
+ E_NO_CHORD_SUPPORT = """
+ The "rpc" result backend does not support chords!
+ 
+@@ -40,12 +44,14 @@ class ResultConsumer(BaseResultConsumer):
+ 
+     _connection = None
+     _consumer = None
++    _no_ack = True
+ 
+     def __init__(self, *args, **kwargs):
+         super().__init__(*args, **kwargs)
+         self._create_binding = self.backend._create_binding
+ 
+     def start(self, initial_task_id, no_ack=True, **kwargs):
++        self._no_ack = no_ack
+         self._connection = self.app.connection()
+         initial_queue = self._create_binding(initial_task_id)
+         self._consumer = self.Consumer(
+@@ -54,12 +60,67 @@ def start(self, initial_task_id, no_ack=True, **kwargs):
+             accept=self.accept)
+         self._consumer.consume()
+ 
++    @contextmanager
++    def _handle_connection_errors(self):
++        """Context manager that catches broker connection/channel errors and reconnects."""
++        try:
++            yield
++        except (self._connection.connection_errors
++                + self._connection.channel_errors) as exc:
++            logger.warning(
++                'RPC result consumer: connection lost (%s), '
++                'attempting to reconnect...', exc,
++            )
++            self._reconnect()
++
+     def drain_events(self, timeout=None):
+         if self._connection:
+-            return self._connection.drain_events(timeout=timeout)
++            with self._handle_connection_errors():
++                return self._connection.drain_events(timeout=timeout)
+         elif timeout:
+             time.sleep(timeout)
+ 
++    def _reconnect(self):
++        """Close the stale connection and rebuild the consumer.
++
++        Re-subscribes to every queue that the old consumer was listening on
++        so that pending results can still be drained.
++        """
++        old_queues = []
++        if self._consumer is not None:
++            old_queues = list(self._consumer.queues)
++            try:
++                self._consumer.cancel()
++            except Exception:
++                logger.debug(
++                    'RPC result consumer: error while cancelling stale '
++                    'consumer during reconnect',
++                    exc_info=True,
++                )
++
++        if self._connection is not None:
++            try:
++                self._connection.close()
++            except Exception:
++                logger.debug(
++                    'RPC result consumer: error while closing stale '
++                    'connection during reconnect',
++                    exc_info=True,
++                )
++            self._connection = None
++
++        # Establish a fresh connection and consumer.
++        self._connection = self.app.connection()
++        self._consumer = self.Consumer(
++            self._connection.default_channel,
++            old_queues,
++            callbacks=[self.on_state_change],
++            no_ack=self._no_ack,
++            accept=self.accept,
++        )
++        self._consumer.consume()
++        logger.info('RPC result consumer: reconnected successfully.')
++
+     def stop(self):
+         try:
+             self._consumer.cancel()
+diff --git a/celery/backends/asynchronous.py b/celery/backends/asynchronous.py
+index 0413afecc8a..c5f292ceb6e 100644
+--- a/celery/backends/asynchronous.py
++++ b/celery/backends/asynchronous.py
+@@ -5,6 +5,7 @@
+ import threading
+ import time
+ from collections import deque
++from contextlib import contextmanager
+ from queue import Empty
+ from time import sleep
+ from weakref import WeakKeyDictionary
+@@ -13,10 +14,18 @@
+ 
+ from celery import states
+ from celery.exceptions import TimeoutError
++from celery.utils.log import get_logger
+ from celery.utils.threads import THREAD_TIMEOUT_MAX
+ 
+ E_CELERY_RESTART_REQUIRED = "Celery must be restarted because a shutdown signal was detected."
+ 
++E_RETRY_LIMIT_EXCEEDED = """
++Retry limit exceeded while trying to reconnect to the Celery result store
++backend. The Celery application must be restarted.
++"""
++
++logger = get_logger(__name__)
++
+ __all__ = (
+     'AsyncBackendMixin', 'BaseResultConsumer', 'Drainer',
+     'register_drainer',
+@@ -307,6 +316,11 @@ def is_async(self):
+ class BaseResultConsumer:
+     """Manager responsible for consuming result messages."""
+ 
++    #: Tuple of transport-layer exceptions that signal a lost connection.
++    #: Subclasses should override this with the appropriate exception types
++    #: so that :meth:`reconnect_on_error` can catch and recover from them.
++    _connection_errors = ()
++
+     def __init__(self, backend, app, accept,
+                  pending_results, pending_messages):
+         self.backend = backend
+@@ -321,6 +335,34 @@ def __init__(self, backend, app, accept,
+     def start(self, initial_task_id, **kwargs):
+         raise NotImplementedError()
+ 
++    @contextmanager
++    def reconnect_on_error(self):
++        """Context manager that catches connection errors and reconnects.
++
++        Wraps a block of code so that any :attr:`_connection_errors` raised
++        inside it trigger a call to :meth:`_reconnect`.  If reconnection
++        itself raises a connection error the consumer is considered
++        unrecoverable and a :exc:`RuntimeError` is raised to signal that
++        the Celery application must be restarted.
++        """
++        try:
++            yield
++        except self._connection_errors:
++            try:
++                self._reconnect()
++            except self._connection_errors as exc:
++                logger.critical(E_RETRY_LIMIT_EXCEEDED)
++                raise RuntimeError(E_RETRY_LIMIT_EXCEEDED) from exc
++
++    def _reconnect(self):
++        """Re-establish the backend connection.
++
++        Subclasses must override this method to perform the transport-specific
++        reconnection logic that should be executed when a connection error is
++        caught by :meth:`reconnect_on_error`.
++        """
++        pass
++
+     def stop(self):
+         pass
+ 
+diff --git a/celery/backends/redis.py b/celery/backends/redis.py
+index 4e8c2d901a0..25fae609f67 100644
+--- a/celery/backends/redis.py
++++ b/celery/backends/redis.py
+@@ -1,6 +1,5 @@
+ """Redis result store backend."""
+ import time
+-from contextlib import contextmanager
+ from functools import partial
+ from ssl import CERT_NONE, CERT_OPTIONAL, CERT_REQUIRED
+ from urllib.parse import unquote
+@@ -72,11 +71,6 @@
+ 
+ E_LOST = 'Connection to Redis lost: Retry (%s/%s) %s.'
+ 
+-E_RETRY_LIMIT_EXCEEDED = """
+-Retry limit exceeded while trying to reconnect to the Celery redis result \
+-store backend. The Celery application must be restarted.
+-"""
+-
+ logger = get_logger(__name__)
+ 
+ 
+@@ -122,16 +116,9 @@ def _reconnect_pubsub(self):
+             # The on_connect callback will re-subscribe to any channels we previously subscribed to.
+             self._pubsub.connection.register_connect_callback(self._pubsub.on_connect)
+ 
+-    @contextmanager
+-    def reconnect_on_error(self):
+-        try:
+-            yield
+-        except self._connection_errors:
+-            try:
+-                self._ensure(self._reconnect_pubsub, ())
+-            except self._connection_errors as e:
+-                logger.critical(E_RETRY_LIMIT_EXCEEDED)
+-                raise RuntimeError(E_RETRY_LIMIT_EXCEEDED) from e
++    def _reconnect(self):
++        """Re-establish the Redis pub/sub connection with retry."""
++        self._ensure(self._reconnect_pubsub, ())
+ 
+     def _maybe_cancel_ready_task(self, meta):
+         if meta['status'] in states.READY_STATES:
+diff --git a/celery/backends/rpc.py b/celery/backends/rpc.py
+index 42fef2072c5..577eb7d404f 100644
+--- a/celery/backends/rpc.py
++++ b/celery/backends/rpc.py
+@@ -4,7 +4,6 @@
+ """
+ import logging
+ import time
+-from contextlib import contextmanager
+ 
+ import kombu
+ from kombu.common import maybe_declare
+@@ -53,6 +52,10 @@ def __init__(self, *args, **kwargs):
+     def start(self, initial_task_id, no_ack=True, **kwargs):
+         self._no_ack = no_ack
+         self._connection = self.app.connection()
++        self._connection_errors = (
++            self._connection.connection_errors
++            + self._connection.channel_errors
++        )
+         initial_queue = self._create_binding(initial_task_id)
+         self._consumer = self.Consumer(
+             self._connection.default_channel, [initial_queue],
+@@ -60,22 +63,9 @@ def start(self, initial_task_id, no_ack=True, **kwargs):
+             accept=self.accept)
+         self._consumer.consume()
+ 
+-    @contextmanager
+-    def _handle_connection_errors(self):
+-        """Context manager that catches broker connection/channel errors and reconnects."""
+-        try:
+-            yield
+-        except (self._connection.connection_errors
+-                + self._connection.channel_errors) as exc:
+-            logger.warning(
+-                'RPC result consumer: connection lost (%s), '
+-                'attempting to reconnect...', exc,
+-            )
+-            self._reconnect()
+-
+     def drain_events(self, timeout=None):
+         if self._connection:
+-            with self._handle_connection_errors():
++            with self.reconnect_on_error():
+                 return self._connection.drain_events(timeout=timeout)
+         elif timeout:
+             time.sleep(timeout)
+@@ -86,6 +76,10 @@ def _reconnect(self):
+         Re-subscribes to every queue that the old consumer was listening on
+         so that pending results can still be drained.
+         """
++        logger.warning(
++            'RPC result consumer: connection lost, attempting to reconnect...',
++            exc_info=True,
++        )
+         old_queues = []
+         if self._consumer is not None:
+             old_queues = list(self._consumer.queues)
+@@ -111,6 +105,10 @@ def _reconnect(self):
+ 
+         # Establish a fresh connection and consumer.
+         self._connection = self.app.connection()
++        self._connection_errors = (
++            self._connection.connection_errors
++            + self._connection.channel_errors
++        )
+         self._consumer = self.Consumer(
+             self._connection.default_channel,
+             old_queues,

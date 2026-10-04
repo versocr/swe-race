@@ -1,0 +1,68 @@
+diff --git a/droll/player.py b/droll/player.py
+index 3b0a943..68e0137 100644
+--- a/droll/player.py
++++ b/droll/player.py
+@@ -122,14 +122,15 @@ def apply(
+ 
+     Processes hero-like artifacts (i.e. not rings/portals/scales).
+     For example, what heroes to revive when quaffing a potion."""
+-    # Convert any artifacts in the command into any corresponding hero types
+-    command, targets = _partify_all(player.artifacts, command, targets)
+-
+     # One-off handling of some treasures, with error wrapping to aid usability
+     if command == "portal":
+         raise DrollError('To use a portal, directly "retire".')
+     if command == "ring":
+         raise DrollError('To use a ring, directly "descend" or "retire".')
++
++    # Dispatch ability/bait/elixir before artifact-to-hero translation (#181).
++    # These commands define their own target semantics (e.g. paladin_ability
++    # expects a treasure name, not a hero name) so _partify_all is wrong here.
+     if command in {"ability", "bait", "elixir"}:
+         try:
+             action_ = getattr(player, command)
+@@ -137,6 +138,9 @@ def apply(
+         except AttributeError as cause:
+             raise DrollError(str(cause)) from cause
+ 
++    # Convert any artifacts in the command into any corresponding hero types
++    command, targets = _partify_all(player.artifacts, command, targets)
++
+     # Temporarily inflate party with treasure-as-hero counts
+     prior_own = world.treasure.own
+     world = _adjust_phantom_treasures(world, player.artifacts, prior_own, +1)
+diff --git a/droll/treasure.py b/droll/treasure.py
+index 80df188..9ad21f0 100644
+--- a/droll/treasure.py
++++ b/droll/treasure.py
+@@ -46,6 +46,8 @@ def draw_treasure(treasure: Treasure, randrange: RandRange) -> Treasure:
+ 
+ def replace_treasure(treasure: Treasure, item: str) -> Treasure:
+     """Replace a single item from the player's own artifacts into the box."""
++    if not hasattr(treasure.own, item):
++        raise DrollError(f"'{item}' is not a valid treasure type.")
+     prior_count = getattr(treasure.own, item)
+     if not prior_count:
+         raise DrollError(f"'{item}' not in player's treasure.")
+diff --git a/droll/player.py b/droll/player.py
+index 68e0137..33eef1a 100644
+--- a/droll/player.py
++++ b/droll/player.py
+@@ -136,6 +136,8 @@ def apply(
+             action_ = getattr(player, command)
+             return action_(world, randrange, command, targets)
+         except AttributeError as cause:
++            if world.dungeon is None:
++                raise DrollError("You must descend first.") from cause
+             raise DrollError(str(cause)) from cause
+ 
+     # Convert any artifacts in the command into any corresponding hero types
+@@ -162,6 +164,8 @@ def apply(
+             raise DrollError(f'"{command}" requires a target.{hint}')
+         if not hasattr(action_, targets[0]):
+             raise DrollError(f'Unknown target "{targets[0]}".')
++        if world.dungeon is None:
++            raise DrollError("You must descend first.")
+         try:
+             action_ = getattr(action_, targets[0])
+             world = action_(world, randrange, command, targets)

@@ -1,0 +1,71 @@
+diff --git a/tests/test_encrypted_device.py b/tests/test_encrypted_device.py
+index 3ebfc886..1ed071a7 100644
+--- a/tests/test_encrypted_device.py
++++ b/tests/test_encrypted_device.py
+@@ -365,3 +365,22 @@ async def test_empty_data_encryption_decryption() -> None:
+     # Test empty decryption
+     decrypted = device._decrypt(bytearray())
+     assert decrypted == b""
++
++
++@pytest.mark.asyncio
++async def test_decrypt_with_none_iv_during_disconnect() -> None:
++    """Test that decryption returns empty bytes when IV is None during expected disconnect."""
++    device = create_encrypted_device()
++
++    # Simulate disconnection in progress
++    device._expected_disconnect = True
++    device._iv = None
++
++    # Should return empty bytes instead of raising
++    result = device._decrypt(bytearray(b"encrypted_data"))
++    assert result == b""
++
++    # Verify it still raises when not disconnecting
++    device._expected_disconnect = False
++    with pytest.raises(RuntimeError, match="Cannot decrypt: IV is None"):
++        device._decrypt(bytearray(b"encrypted_data"))
+diff --git a/tests/test_lock.py b/tests/test_lock.py
+index fc4f8337..6994e952 100644
+--- a/tests/test_lock.py
++++ b/tests/test_lock.py
+@@ -1,3 +1,4 @@
++import logging
+ from unittest.mock import AsyncMock, Mock, patch
+ 
+ import pytest
+@@ -478,6 +479,34 @@ def test_notification_handler_not_enabled(model: str):
+         mock_super.assert_called_once()
+ 
+ 
++@pytest.mark.parametrize(
++    "model",
++    [
++        SwitchbotModel.LOCK,
++        SwitchbotModel.LOCK_LITE,
++        SwitchbotModel.LOCK_PRO,
++        SwitchbotModel.LOCK_ULTRA,
++    ],
++)
++def test_notification_handler_during_disconnect(
++    model: str, caplog: pytest.LogCaptureFixture
++) -> None:
++    """Test _notification_handler during expected disconnect."""
++    device = create_device_for_command_testing(model)
++    device._notifications_enabled = True
++    device._expected_disconnect = True
++    data = bytearray(b"\x0f\x00\x00\x00\x80\x00\x00\x00\x00\x00")
++    with (
++        patch.object(device, "_update_lock_status") as mock_update,
++        caplog.at_level(logging.DEBUG),
++    ):
++        device._notification_handler(0, data)
++        # Should not update lock status during disconnect
++        mock_update.assert_not_called()
++        # Should log debug message
++        assert "Ignoring lock notification during expected disconnect" in caplog.text
++
++
+ @pytest.mark.parametrize(
+     "model",
+     [

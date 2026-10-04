@@ -1,0 +1,258 @@
+diff --git a/tests/advanced_search_system/strategies/test_iterdrag_strategy.py b/tests/advanced_search_system/strategies/test_iterdrag_strategy.py
+index 47ce3292..ec886379 100644
+--- a/tests/advanced_search_system/strategies/test_iterdrag_strategy.py
++++ b/tests/advanced_search_system/strategies/test_iterdrag_strategy.py
+@@ -106,7 +106,9 @@ class TestIterDRAGStrategyInit:
+ 
+         IterDRAGStrategy(search=mock_search, model=mock_model)
+ 
+-        mock_citation.assert_called_once_with(mock_model)
++        mock_citation.assert_called_once_with(
++            mock_model, settings_snapshot=None
++        )
+         mock_question.assert_called_once_with(mock_model)
+         mock_knowledge.assert_called_once_with(mock_model)
+         mock_findings.assert_called_once_with(mock_model)
+diff --git a/tests/database/test_thread_local_session.py b/tests/database/test_thread_local_session.py
+index 65b850f1..d6a18e4d 100644
+--- a/tests/database/test_thread_local_session.py
++++ b/tests/database/test_thread_local_session.py
+@@ -404,3 +404,164 @@ class TestGlobalInstance:
+         )
+ 
+         assert isinstance(thread_session_manager, ThreadLocalSessionManager)
++
++
++class TestThreadCleanup:
++    """Tests for thread_cleanup decorator / context manager."""
++
++    def _patch_all_cleanup(self):
++        """Return a stack of patches for the three cleanup functions."""
++        return (
++            patch(
++                "local_deep_research.database.thread_local_session.cleanup_current_thread"
++            ),
++            patch(
++                "local_deep_research.database.thread_local_session._ThreadCleanup.__exit__",
++                wraps=None,
++            ),
++        )
++
++    def test_bare_decorator_runs_cleanup(self):
++        """@thread_cleanup runs cleanup on exit and returns result."""
++        from local_deep_research.database.thread_local_session import (
++            thread_cleanup,
++        )
++
++        mock_cleanup = Mock()
++
++        with patch(
++            "local_deep_research.database.thread_local_session.cleanup_current_thread",
++            mock_cleanup,
++        ):
++
++            @thread_cleanup
++            def worker():
++                return 42
++
++            result = worker()
++
++        assert result == 42
++        mock_cleanup.assert_called_once()
++
++    def test_factory_decorator_runs_cleanup(self):
++        """@thread_cleanup() (with parens) runs cleanup on exit and returns result."""
++        from local_deep_research.database.thread_local_session import (
++            thread_cleanup,
++        )
++
++        mock_cleanup = Mock()
++
++        with patch(
++            "local_deep_research.database.thread_local_session.cleanup_current_thread",
++            mock_cleanup,
++        ):
++
++            @thread_cleanup()
++            def worker():
++                return 99
++
++            result = worker()
++
++        assert result == 99
++        mock_cleanup.assert_called_once()
++
++    def test_context_manager_runs_cleanup(self):
++        """with thread_cleanup(): runs cleanup on exit."""
++        from local_deep_research.database.thread_local_session import (
++            thread_cleanup,
++        )
++
++        mock_cleanup = Mock()
++
++        with patch(
++            "local_deep_research.database.thread_local_session.cleanup_current_thread",
++            mock_cleanup,
++        ):
++            with thread_cleanup():
++                pass
++
++        mock_cleanup.assert_called_once()
++
++    def test_inline_wrapper_runs_cleanup(self):
++        """thread_cleanup(func) as inline wrapper runs cleanup on exit."""
++        from local_deep_research.database.thread_local_session import (
++            thread_cleanup,
++        )
++
++        mock_cleanup = Mock()
++
++        def worker(x):
++            return x * 2
++
++        with patch(
++            "local_deep_research.database.thread_local_session.cleanup_current_thread",
++            mock_cleanup,
++        ):
++            wrapped = thread_cleanup(worker)
++            result = wrapped(5)
++
++        assert result == 10
++        mock_cleanup.assert_called_once()
++
++    def test_cleanup_exception_logged_not_raised(self):
++        """Cleanup exceptions are logged at debug level, not raised."""
++        from local_deep_research.database.thread_local_session import (
++            thread_cleanup,
++        )
++
++        with (
++            patch(
++                "local_deep_research.database.thread_local_session.cleanup_current_thread",
++                side_effect=RuntimeError("cleanup boom"),
++            ),
++            patch(
++                "local_deep_research.database.thread_local_session.logger"
++            ) as mock_logger,
++        ):
++
++            @thread_cleanup
++            def worker():
++                return "ok"
++
++            result = worker()
++
++        assert result == "ok"
++        mock_logger.debug.assert_called()
++
++    def test_original_exception_propagates_when_cleanup_fails(self):
++        """Original exceptions propagate even when cleanup fails."""
++        from local_deep_research.database.thread_local_session import (
++            thread_cleanup,
++        )
++
++        with (
++            patch(
++                "local_deep_research.database.thread_local_session.cleanup_current_thread",
++                side_effect=RuntimeError("cleanup boom"),
++            ),
++            patch("local_deep_research.database.thread_local_session.logger"),
++        ):
++
++            @thread_cleanup
++            def worker():
++                raise ValueError("original error")
++
++            try:
++                worker()
++                assert False, "Should have raised ValueError"
++            except ValueError as e:
++                assert str(e) == "original error"
++
++    def test_functools_wraps_metadata_preserved(self):
++        """functools.wraps metadata preserved on decorated functions."""
++        from local_deep_research.database.thread_local_session import (
++            thread_cleanup,
++        )
++
++        @thread_cleanup
++        def my_worker():
++            """My docstring."""
++            pass
++
++        assert my_worker.__name__ == "my_worker"
++        assert my_worker.__doc__ == "My docstring."
+diff --git a/tests/strategies/test_strategy_instantiation.py b/tests/strategies/test_strategy_instantiation.py
+index b8ccad76..9a545e39 100644
+--- a/tests/strategies/test_strategy_instantiation.py
++++ b/tests/strategies/test_strategy_instantiation.py
+@@ -228,6 +228,69 @@ class TestStrategyDefaultValues:
+         assert isinstance(strategy.questions_by_iteration, dict)
+ 
+ 
++class TestOutputInstructionsPropagation:
++    """Regression test: settings_snapshot with output_instructions reaches citation handler."""
++
++    STRATEGIES_WITH_CITATION_HANDLER = [
++        "source-based",
++        "standard",
++        "parallel",
++        "rapid",
++        "iterdrag",
++        "focused-iteration",
++    ]
++
++    @pytest.mark.parametrize("strategy_name", STRATEGIES_WITH_CITATION_HANDLER)
++    def test_output_instructions_reach_citation_handler(
++        self,
++        strategy_name: str,
++        strategy_mock_llm,
++        strategy_mock_search,
++        strategy_settings_snapshot,
++    ):
++        """Test that general.output_instructions in the snapshot is visible to the citation handler."""
++        from local_deep_research.search_system_factory import create_strategy
++
++        snapshot = {
++            **strategy_settings_snapshot,
++            "general.output_instructions": "Respond in Spanish",
++        }
++
++        strategy = create_strategy(
++            strategy_name=strategy_name,
++            model=strategy_mock_llm,
++            search=strategy_mock_search,
++            settings_snapshot=snapshot,
++        )
++
++        handler = strategy.citation_handler
++        # The internal handler should produce the output instruction prefix
++        prefix = handler._handler._get_output_instruction_prefix()
++        assert "Respond in Spanish" in prefix
++
++    @pytest.mark.parametrize("strategy_name", STRATEGIES_WITH_CITATION_HANDLER)
++    def test_no_output_instructions_produces_empty_prefix(
++        self,
++        strategy_name: str,
++        strategy_mock_llm,
++        strategy_mock_search,
++        strategy_settings_snapshot,
++    ):
++        """Test that omitting output_instructions yields an empty prefix."""
++        from local_deep_research.search_system_factory import create_strategy
++
++        strategy = create_strategy(
++            strategy_name=strategy_name,
++            model=strategy_mock_llm,
++            search=strategy_mock_search,
++            settings_snapshot=strategy_settings_snapshot,
++        )
++
++        handler = strategy.citation_handler
++        prefix = handler._handler._get_output_instruction_prefix()
++        assert prefix == ""
++
++
+ class TestSharedLinksIsolation:
+     """Test that all_links_of_system is properly isolated between instances."""
+ 

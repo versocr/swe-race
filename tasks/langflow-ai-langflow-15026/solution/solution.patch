@@ -1,0 +1,30 @@
+diff --git a/src/backend/base/langflow/services/task/backends/celery.py b/src/backend/base/langflow/services/task/backends/celery.py
+index 67ceeb09f402..74a77f98c2ad 100644
+--- a/src/backend/base/langflow/services/task/backends/celery.py
++++ b/src/backend/base/langflow/services/task/backends/celery.py
+@@ -51,6 +51,9 @@ def revoke_task(self, task_id: str) -> bool:
+         from celery.result import AsyncResult
+ 
+         try:
+-            return AsyncResult(task_id, app=self.celery_app).revoke(terminate=True)
++            AsyncResult(task_id, app=self.celery_app).revoke(terminate=True)
+         except TaskRevokedError:
+             return True
++        # AsyncResult.revoke broadcasts and returns None. True means the revoke
++        # was published, not that a worker has stopped the task.
++        return True
+diff --git a/src/backend/base/langflow/services/task/service.py b/src/backend/base/langflow/services/task/service.py
+index c4ba5959ec20..b1f879eecc03 100644
+--- a/src/backend/base/langflow/services/task/service.py
++++ b/src/backend/base/langflow/services/task/service.py
+@@ -92,7 +92,9 @@ async def launch_task(self, task_func: Callable[..., Any], *args: Any, **kwargs:
+ 
+     async def revoke_task(self, task_id: UUID | str) -> bool:
+         if self.use_celery:
+-            return await self.backend.revoke_task(str(task_id))
++            # CeleryBackend.revoke_task is synchronous and publishes to the
++            # broker, so run it off the event loop instead of awaiting it.
++            return await asyncio.to_thread(self.backend.revoke_task, str(task_id))
+ 
+         job_queue_service = get_queue_service()
+         try:

@@ -1,0 +1,88 @@
+diff --git a/tests/heroes/test_crusader.py b/tests/heroes/test_crusader.py
+index de867fa..fecf123 100644
+--- a/tests/heroes/test_crusader.py
++++ b/tests/heroes/test_crusader.py
+@@ -6,7 +6,7 @@
+ import random
+ import pytest
+ 
+-from droll import struct
++from droll import player, struct
+ from droll.ability import crusader_ability, paladin_ability
+ from droll.heroes.crusader import Crusader, Paladin
+ 
+@@ -134,3 +134,25 @@ def test_paladin_ability_requires_treasure():
+     )
+     with pytest.raises(struct.DrollError):
+         paladin_ability(world, _UNUSED, "ability")
++
++
++def test_paladin_ability_talisman_via_apply(
++):
++    """Paladin ability with 'talisman' artifact must not be mangled (#181).
++
++    When the user types 'ability talisman', _partify_all() was converting
++    'talisman' to 'cleric' before paladin_ability could consume it as a
++    treasure name, producing "'Artifacts' object has no attribute 'cleric'"."""
++    world = struct.World(
++        ability=True,
++        dungeon=struct.Dungeon(goblin=2, skeleton=1, dragon=1),
++        party=struct.Party(fighter=1, cleric=1),
++        treasure=struct.Treasure(
++            own=struct.Artifacts(talisman=1),
++            box=struct.Artifacts(sword=1),
++        ),
++    )
++    result = player.apply(Paladin, world, _UNUSED, "ability", "talisman")
++    assert sum(struct.field_values(result.dungeon)) == 0
++    assert result.treasure.own.talisman == 0
++    assert not result.ability
+diff --git a/tests/test_player.py b/tests/test_player.py
+index 32b6703..1071378 100644
+--- a/tests/test_player.py
++++ b/tests/test_player.py
+@@ -178,6 +178,21 @@ class TestPlayer:
+         with pytest.raises(struct.DrollError, match="reroll"):
+             player.apply(player.Default, self.game, None, "scroll", "goblin")
+ 
++    def test_no_dungeon_hero_target(self):
++        """Hero targeting with no dungeon gives user-friendly error."""
++        no_dungeon = replace(self.game, dungeon=None)
++        for hero in struct.field_names(struct.Party):
++            with pytest.raises(struct.DrollError, match="You must descend first"):
++                player.apply(player.Default, no_dungeon, None, hero, "goblin")
++
++    def test_no_dungeon_ability(self):
++        """Ability targeting with no dungeon gives user-friendly error."""
++        from droll.heroes import enchantress
++
++        no_dungeon = replace(self.game, dungeon=None, ability=True)
++        with pytest.raises(struct.DrollError, match="You must descend first"):
++            player.apply(enchantress.Enchantress, no_dungeon, None, "ability", "goblin")
++
+ 
+ # Shorthand: method returns unsorted generator
+ def complete(*args):
+diff --git a/tests/test_treasure.py b/tests/test_treasure.py
+index f947d89..616cea8 100644
+--- a/tests/test_treasure.py
++++ b/tests/test_treasure.py
+@@ -8,6 +8,7 @@ import random
+ import pytest
+ 
+ from droll import player, struct, world
++from droll.treasure import replace_treasure
+ 
+ 
+ class TestTreasure:
+@@ -108,3 +109,10 @@ class TestTreasure:
+         assert game.treasure.own.tools == 0
+         assert game.party.thief == 0
+         assert game.dungeon.goblin == 1
++
++
++def test_replace_treasure_invalid_type():
++    """replace_treasure raises DrollError for non-treasure names."""
++    treasure = struct.Treasure(own=struct.Artifacts(sword=1))
++    with pytest.raises(struct.DrollError, match="not a valid treasure type"):
++        replace_treasure(treasure, "cleric")

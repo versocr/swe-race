@@ -1,0 +1,46 @@
+diff --git a/KrabEar/core/punctuation_fixer.py b/KrabEar/core/punctuation_fixer.py
+index b2bef379f..6925c57e7 100644
+--- a/KrabEar/core/punctuation_fixer.py
++++ b/KrabEar/core/punctuation_fixer.py
+@@ -19,6 +19,12 @@
+ _NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,;!?»])([^\s\d»\"')\]])")
+ _NO_SPACE_AFTER_PERIOD_RE = re.compile(r"(\.)([А-ЯA-ZЁ])")
+ 
++# STT-no-space: period (or ?!) immediately followed by a lowercase ES/EN letter —
++# common Whisper output like "dime.como".  Only applied in ES mode.
++# Excludes abbreviation-style runs (e.g. "e.g.", "U.S.A") by requiring the
++# character BEFORE the period to be a word character (not already a digit).
++_NO_SPACE_AFTER_SENT_LOWER_ES_RE = re.compile(r"([.!?])([a-záéíóúüñ¿¡])", re.IGNORECASE)
++
+ # Множественные пробелы
+ _MULTI_SPACE_RE = re.compile(r"  +")
+ 
+@@ -106,6 +112,12 @@ def _fix_spanish(self, text: str) -> str:
+         """Правила, специфичные для испанского языка."""
+         result = text
+ 
++        # Нормализация STT «без пробела после знака»: Whisper иногда выводит
++        # "dime.como te llamas?" (без пробела после точки перед строчной буквой).
++        # Вставляем пробел, чтобы сплиттер предложений мог корректно разбить текст.
++        # Применяется только для ES, до marker-insertion.
++        result = _NO_SPACE_AFTER_SENT_LOWER_ES_RE.sub(r"\1 \2", result)
++
+         # Капитализировать первое слово
+         if result and result[0].islower():
+             result = result[0].upper() + result[1:]
+diff --git a/KrabEar/core/punctuation_fixer.py b/KrabEar/core/punctuation_fixer.py
+index ef6c5749d..2e0bb9359 100644
+--- a/KrabEar/core/punctuation_fixer.py
++++ b/KrabEar/core/punctuation_fixer.py
+@@ -15,8 +15,9 @@
+ # Пробел перед знаками препинания (,.:;!?)
+ _SPACE_BEFORE_PUNCT_RE = re.compile(r"\s+([,.:;!?»])")
+ 
+-# Отсутствие пробела после знаков препинания (,.:;!? — но не декимальные дроби и не «)
+-_NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,;!?»])([^\s\d»\"')\]])")
++# Отсутствие пробела после знаков препинания (,.:;!? — но не декимальные дроби, не «, не URL)
++# ':' включён, но (?!/) исключает URL-схемы (http:/, https:/, file:/ и т.п.)
++_NO_SPACE_AFTER_PUNCT_RU_RE = re.compile(r"([,;!?»]|:(?!/))([^\s\d»\"')\]])")
+ _NO_SPACE_AFTER_PERIOD_RE = re.compile(r"(\.)([А-ЯA-ZЁ])")
+ 
+ # STT-no-space: period (or ?!) immediately followed by a lowercase ES/EN letter —
